@@ -1,13 +1,32 @@
 services:
   - type: web
     name: leech-bot
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    env: docker
+    plan: free  # Change to 'starter' or 'plus' for more power
+    dockerfilePath: ./Dockerfile
     envVars:
-      - key: PORT
-        value: 10000
+      # REQUIRED: Telegram API Credentials
+      - key: BOT_TOKEN
+        value: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
+      - key: API_ID
+        value: 2819362
+      - key: API_HASH
+        value: 578ce3d09fadd539544a327c45b55ee4
+      
+      # OPTIONAL: Performance tuning
       - key: MAX_CONCURRENT_DOWNLOADS
         value: 3
       - key: MAX_CONCURRENT_UPLOADS
         value: 5
+      
+      # OPTIONAL: QBittorrent settings
+      - key: QBITT_HOST
+        value: http://localhost:8080
+      - key: QBITT_USER
+        value: admin
+      - key: QBITT_PASS
+        value: adminadmin
+      
+      # Render required
+      - key: PORT
+        value: 10000
