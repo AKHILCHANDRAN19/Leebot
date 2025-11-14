@@ -25,7 +25,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 HARDCODED_CONFIG = {
     'API_ID': 2819362,
     'API_HASH': '578ce3d09fadd539544a327c45b55ee4',
-    'BOT_TOKEN': '8024921755:AAEeckFdBxX8jDhAMhvKmCJRlwoz3drlkTs',
+    'BOT_TOKEN': '8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0',
     'ALLOWED_USERS': None,  # None = allow all users
 }
 # ========== END CREDENTIALS ==========
