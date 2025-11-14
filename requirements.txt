@@ -1,0 +1,9 @@
+pyrogram==2.0.106
+aiohttp==3.9.1
+aiofiles==23.2.1
+aria2p==0.11.3
+python-dotenv==1.0.0
+uvloop==0.19.0; sys_platform != "win32"
+yt-dlp==2023.12.30
+psutil==5.9.8
+pillow==10.2.0
