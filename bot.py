@@ -1,470 +1,444 @@
-#!/usr/bin/env python3
-"""
-WZML-X Style Telegram Leech Bot - Single File Edition
-Only Leech functionality, no mirror features
-"""
-
-import asyncio
 import os
-import re
-import sys
+import asyncio
+import logging
 import time
-import urllib.parse
+import shutil
 from pathlib import Path
-from typing import Optional, Tuple
-
+from typing import List, Optional, Callable
 import aiofiles
-import aria2p
+import aiohttp
 from pyrogram import Client, filters, enums
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
+from pyrogram.errors import FloodWait
+import yt_dlp
+import aioqbt
+import psutil
+from tenacity import retry, stop_after_attempt, wait_exponential
+from PIL import Image
+import magic
 import uvloop
+from fastapi import FastAPI
+import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ============= Configuration =============
-API_ID = 2819362
-API_HASH = "578ce3d09fadd539544a327c45b55ee4"
-BOT_TOKEN = "8024921755:AAEeckFdBxX8jDhAMhvKmCJRlwoz3drlkTs"
-OWNER_ID = 0  # CHANGE THIS TO YOUR USER ID
+# ========== ⚠️ HARDCODED CREDENTIALS - CHANGE FOR PRODUCTION ==========
+HARDCODED_CONFIG = {
+    'API_ID': 2819362,
+    'API_HASH': '578ce3d09fadd539544a327c45b55ee4',
+    'BOT_TOKEN': '8024921755:AAEeckFdBxX8jDhAMhvKmCJRlwoz3drlkTs',
+    'ALLOWED_USERS': None,  # None = allow all; or set: {123456789, 987654321}
+}
+# ========== END CREDENTIALS ==========
 
-# Bot Settings
-DOWNLOAD_DIR = "/usr/src/app/downloads/"
-LEECH_SPLIT_SIZE = 2097152000  # 2GB
-AS_DOCUMENT = False
-ARIA2_RPC_PORT = 6800
-ARIA2_RPC_HOST = "localhost"
-ARIA2_RPC_SECRET = ""
-
-# Aria2 Configuration
-ARIA2_CONF = {
-    "dir": DOWNLOAD_DIR,
-    "max-connection-per-server": "16",
-    "split": "32",
-    "min-split-size": "1M",
-    "max-concurrent-downloads": "3",
-    "max-download-limit": "0",
-    "seed-time": "0",
-    "follow-torrent": "false",
-    "file-allocation": "falloc"
+CONFIG = {
+    'DOWNLOAD_DIR': Path('/tmp/downloads'),
+    'MAX_CONCURRENT_DOWNLOADS': 3,
+    'MAX_CONCURRENT_UPLOADS': 5,
+    'ARIA2_RPC': "http://localhost:6800/jsonrpc",  # Not used but kept for compatibility
+    'QBITT_HOST': "http://localhost:8080",
+    'QBITT_USER': 'admin',
+    'QBITT_PASS': 'adminadmin',
+    **HARDCODED_CONFIG,  # Override with hardcoded values
 }
 
-# ============= URL Validator =============
-class URLValidator:
-    @staticmethod
-    def is_valid_url(url: str) -> bool:
-        """Validate if URL is properly formatted"""
-        try:
-            result = urllib.parse.urlparse(url)
-            return all([result.scheme, result.netloc])
-        except Exception:
-            return False
+# ========== LOGGING ==========
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    @staticmethod
-    def is_supported_url(url: str) -> bool:
-        """Check if URL is supported (direct link, yt-dlp, etc.)"""
-        # Direct file extensions
-        direct_exts = ('.mkv', '.mp4', '.avi', '.mov', '.flv', '.webm', '.mp3', '.m4a', '.flac', '.wav', 
-                      '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.pdf', '.epub', '.mobi')
-        
-        # YT-DLP supported sites pattern
-        yt_dlp_patterns = [
-            r'https?://(www\.)?(youtube|youtu\.be|m\.youtube)\.com/',
-            r'https?://(www\.)?(facebook|fb)\.com/',
-            r'https?://(www\.)?(instagram|instagr\.am)\.com/',
-            r'https?://(www\.)?(twitter|x)\.com/',
-            r'https?://(www\.)?(tiktok)\.com/',
-            r'https?://(www\.)?(vimeo)\.com/',
-            r'https?://(www\.)?(dailymotion)\.com/',
-            r'https?://(www\.)?(pornhub)\.com/',
+# ========== FASTAPI FOR RENDER ==========
+app = FastAPI()
+
+@app.get("/")
+async def health_check():
+    return {
+        "status": "alive",
+        "cpu": f"{psutil.cpu_percent()}%",
+        "memory": f"{psutil.virtual_memory().percent}%",
+        "downloads": len(active_downloads)
+    }
+
+# ========== GLOBALS ==========
+bot = Client(
+    "leech_bot",
+    api_id=CONFIG['API_ID'],
+    api_hash=CONFIG['API_HASH'],
+    bot_token=CONFIG['BOT_TOKEN'],
+    workers=100,
+    max_concurrent_transmissions=CONFIG['MAX_CONCURRENT_UPLOADS']
+)
+
+download_semaphore = asyncio.Semaphore(CONFIG['MAX_CONCURRENT_DOWNLOADS'])
+upload_semaphore = asyncio.Semaphore(CONFIG['MAX_CONCURRENT_UPLOADS'])
+active_downloads = {}
+scheduler = AsyncIOScheduler()
+
+# ========== UTILITY FUNCTIONS ==========
+def is_allowed(user_id: int) -> bool:
+    if CONFIG['ALLOWED_USERS'] is None:
+        return True
+    return user_id in CONFIG['ALLOWED_USERS']
+
+def human_bytes(size: int) -> str:
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
+
+def get_file_info(file_path: Path) -> dict:
+    mime = magic.from_file(str(file_path), mime=True)
+    return {
+        'name': file_path.name,
+        'size': file_path.stat().st_size,
+        'mime': mime,
+        'is_video': mime.startswith('video/'),
+        'is_archive': mime in [
+            'application/zip', 'application/x-7z-compressed',
+            'application/x-rar', 'application/x-tar',
+            'application/gzip', 'application/x-bzip2'
         ]
-        
-        if url.lower().endswith(direct_exts):
+    }
+
+def get_filename_from_url(url: str) -> str:
+    from urllib.parse import urlparse, unquote
+    path = urlparse(url).path
+    return Path(unquote(path)).name or f"download_{int(time.time())}.bin"
+
+def is_ytdlp_supported(url: str) -> bool:
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+            ydl.extract_info(url, download=False)
             return True
-        
-        for pattern in yt_dlp_patterns:
-            if re.match(pattern, url, re.IGNORECASE):
-                return True
-        
-        # Generic direct link check
-        return URLValidator.is_valid_url(url)
+    except:
+        return False
 
-# ============= Aria2 Manager =============
-class Aria2Manager:
-    def __init__(self):
-        self.aria2 = None
-        self.is_connected = False
-    
-    async def connect(self):
-        """Initialize Aria2 connection"""
-        try:
-            self.aria2 = aria2p.API(
-                aria2p.Client(
-                    host=f"http://{ARIA2_RPC_HOST}",
-                    port=ARIA2_RPC_PORT,
-                    secret=ARIA2_RPC_SECRET
-                )
-            )
-            # Test connection
-            self.aria2.get_global_options()
-            self.is_connected = True
-            print("✅ Aria2 connected successfully")
-        except Exception as e:
-            print(f"❌ Aria2 connection failed: {e}")
-            self.is_connected = False
-    
-    async def start_aria2_daemon(self):
-        """Start aria2 daemon if not running"""
-        try:
-            os.system(
-                f"aria2c --enable-rpc --rpc-listen-all --daemon=true "
-                f"--rpc-listen-port={ARIA2_RPC_PORT} "
-                f"--rpc-secret={ARIA2_RPC_SECRET} "
-                f"--dir={ARIA2_CONF['dir']} "
-                f"--max-connection-per-server={ARIA2_CONF['max-connection-per-server']} "
-                f"--split={ARIA2_CONF['split']} "
-                f"--min-split-size={ARIA2_CONF['min-split-size']} "
-                f"--max-concurrent-downloads={ARIA2_CONF['max-concurrent-downloads']} "
-                f"--max-download-limit={ARIA2_CONF['max-download-limit']} "
-                f"--seed-time={ARIA2_CONF['seed-time']} "
-                f"--follow-torrent={ARIA2_CONF['follow-torrent']} "
-                f"--file-allocation={ARIA2_CONF['file-allocation']} "
-                f"--quiet=true"
-            )
-            await asyncio.sleep(2)  # Wait for daemon to start
-            print("🚀 Aria2 daemon started")
-        except Exception as e:
-            print(f"❌ Failed to start Aria2 daemon: {e}")
-    
-    async def download(self, url: str, message: Message) -> Optional[str]:
-        """Download file using Aria2 and return file path"""
-        try:
-            # Add download
-            download = self.aria2.add(url, {"dir": DOWNLOAD_DIR})
-            
-            # Monitor progress
-            last_progress = 0
-            while not download.is_complete:
-                if download.error_message:
-                    raise Exception(f"Aria2 Error: {download.error_message}")
-                
-                download.update()
-                progress = int(download.progress)
-                
-                # Update status every 10%
-                if progress - last_progress >= 10:
-                    await message.edit_text(
-                        f"⬇️ Downloading...\n"
-                        f"📁 {download.name}\n"
-                        f"📊 {progress}%\n"
-                        f"⚡ {download.download_speed_string()}\n"
-                        f"📦 {download.completed_length_string()}/{download.total_length_string()}"
-                    )
-                    last_progress = progress
-                
-                await asyncio.sleep(2)
-            
-            if download.is_complete:
-                return os.path.join(download.dir, download.files[0].path)
-            else:
-                return None
-                
-        except Exception as e:
-            print(f"Download error: {e}")
-            raise
+async def create_thumbnail(video_path: Path) -> Optional[Path]:
+    thumb_path = video_path.with_suffix('.jpg')
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'ffmpeg', '-i', str(video_path), '-ss', '00:00:01',
+            '-vframes', '1', '-vf', 'scale=320:-1', str(thumb_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await process.wait()
+        if thumb_path.exists():
+            return thumb_path
+    except Exception as e:
+        logger.error(f"Thumbnail failed: {e}")
+    return None
 
-# ============= File Utilities =============
-class FileManager:
-    @staticmethod
-    def get_file_size(path: str) -> int:
-        """Get file size in bytes"""
-        try:
-            return os.path.getsize(path)
-        except:
-            return 0
+async def create_zip(files: List[Path], zip_path: Path):
+    import zipfile
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for file in files:
+            zf.write(file, file.name)
+
+async def extract_archive(file_path: Path, extract_to: Path) -> List[Path]:
+    await asyncio.to_thread(extract_to.mkdir, parents=True, exist_ok=True)
+    mime = magic.from_file(str(file_path), mime=True)
     
-    @staticmethod
-    async def split_file(file_path: str, max_size: int = LEECH_SPLIT_SIZE) -> list:
-        """Split large file into parts"""
-        if FileManager.get_file_size(file_path) <= max_size:
+    try:
+        if mime == 'application/zip':
+            await asyncio.to_thread(shutil.unpack_archive, str(file_path), str(extract_to), 'zip')
+        elif mime == 'application/x-tar':
+            await asyncio.to_thread(shutil.unpack_archive, str(file_path), str(extract_to), 'tar')
+        elif mime == 'application/gzip':
+            await asyncio.to_thread(shutil.unpack_archive, str(file_path), str(extract_to), 'gztar')
+        elif mime == 'application/x-bzip2':
+            await asyncio.to_thread(shutil.unpack_archive, str(file_path), str(extract_to), 'bztar')
+        elif mime == 'application/x-rar':
+            process = await asyncio.create_subprocess_exec(
+                'unrar', 'x', str(file_path), str(extract_to), '-y',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await process.wait()
+        else:
             return [file_path]
         
-        # Use Linux split command (efficient for large files)
-        output_dir = os.path.dirname(file_path)
-        base_name = os.path.basename(file_path)
-        name, ext = os.path.splitext(base_name)
+        files = [f for f in extract_to.rglob('*') if f.is_file()]
+        return files if files else [file_path]
         
-        # Create split files
-        split_prefix = os.path.join(output_dir, f"{name}_part_")
-        os.system(f"split -b {max_size} -d {file_path} {split_prefix}")
-        
-        # Get split files list
-        split_files = []
-        for f in os.listdir(output_dir):
-            if f.startswith(f"{name}_part_"):
-                split_files.append(os.path.join(output_dir, f))
-        
-        # Sort by part number
-        split_files.sort()
-        
-        # Rename to include extension
-        final_files = []
-        for i, part in enumerate(split_files):
-            new_name = f"{split_prefix}{i+1:03d}{ext}"
-            os.rename(part, new_name)
-            final_files.append(new_name)
-        
-        # Remove original
-        os.remove(file_path)
-        
-        return final_files
+    except Exception as e:
+        logger.error(f"Extraction failed: {e}")
+        return [file_path]
 
-# ============= Uploader =============
-class TelegramUploader:
-    def __init__(self, client: Client):
-        self.client = client
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+async def download_direct(url: str, dest: Path, progress_callback: Callable):
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=0),
+        connector=aiohttp.TCPConnector(limit=5)
+    ) as session:
+        async with session.get(url, raise_for_status=True) as response:
+            total = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            async with aiofiles.open(dest, 'wb') as f:
+                async for chunk in response.content.iter_chunked(1024*1024):
+                    if chunk:
+                        await f.write(chunk)
+                        downloaded += len(chunk)
+                        await progress_callback(downloaded, total)
+
+async def download_ytdlp(url: str, dest_dir: Path, progress_callback: Callable) -> List[Path]:
+    files = []
     
-    async def upload_file(self, file_path: str, chat_id: int, message: Message, split_file: bool = False):
-        """Upload file to Telegram with progress"""
-        file_size = FileManager.get_file_size(file_path)
-        filename = os.path.basename(file_path)
+    def progress_hook(d):
+        if d['status'] == 'downloading' and progress_callback:
+            total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+            downloaded = d.get('downloaded_bytes', 0)
+            asyncio.create_task(progress_callback(downloaded, total))
+    
+    ytdl_opts = {
+        'outtmpl': str(dest_dir / '%(title)s.%(ext)s'),
+        'progress_hooks': [progress_hook],
+        'noplaylist': True,
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+    }
+    
+    with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if 'entries' in info:
+            for entry in info['entries']:
+                if entry:
+                    file = dest_dir / f"{entry['title']}.{entry['ext']}"
+                    if file.exists():
+                        files.append(file)
+        else:
+            file = dest_dir / f"{info['title']}.{info['ext']}"
+            if file.exists():
+                files.append(file)
+    
+    return files
+
+async def download_torrent(url: str, dest_dir: Path, progress_msg: Message) -> List[Path]:
+    try:
+        async with aioqbt.Client(CONFIG['QBITT_HOST'], username=CONFIG['QBITT_USER'], password=CONFIG['QBITT_PASS']) as qb:
+            if url.startswith('magnet:'):
+                await qb.torrents.add(magnet_urls=[url], save_path=str(dest_dir))
+            else:
+                torrent_file = dest_dir / "temp.torrent"
+                await download_direct(url, torrent_file, lambda d, t: None)
+                with open(torrent_file, 'rb') as f:
+                    await qb.torrents.add(torrent_files=f.read(), save_path=str(dest_dir))
+                torrent_file.unlink()
+            
+            await asyncio.sleep(2)
+            torrents = await qb.torrents.info()
+            torrent = max(torrents, key=lambda t: t.added_on)
+            
+            while torrent.state not in ['uploading', 'pausedUP', 'stalledUP']:
+                torrent = await qb.torrents.info(torrent_hash=torrent.hash)
+                if torrent.state in ['error', 'missingFiles']:
+                    raise Exception("Torrent failed")
+                
+                progress = torrent.progress * 100
+                await progress_msg.edit_text(
+                    f"🌀 **Torrent**\n"
+                    f"{torrent.name[:50]}\n"
+                    f"Progress: {progress:.1f}% | {human_bytes(torrent.dlspeed)}/s\n"
+                    f"Peers: {torrent.num_leechs} | Seeds: {torrent.num_seeds}"
+                )
+                await asyncio.sleep(2)
+            
+            return [f for f in dest_dir.rglob('*') if f.is_file() and not f.name.endswith('.!qB')]
+            
+    except Exception as e:
+        logger.error(f"Torrent error: {e}")
+        raise
+
+async def upload_file(message: Message, file_path: Path, as_video: bool = False):
+    async with upload_semaphore:
+        info = get_file_info(file_path)
+        progress_data = {'last_update': 0}
         
-        # Progress callback
-        async def progress(current, total):
-            if time.time() - getattr(self, '_last_update', 0) < 5:
+        async def progress_callback(current: int, total: int):
+            now = time.time()
+            if now - progress_data['last_update'] < 5:
                 return
-            self._last_update = time.time()
+            progress_data['last_update'] = now
             
-            try:
-                progress_pct = int(current * 100 / total)
-                await message.edit_text(
-                    f"⬆️ Uploading{' part' if split_file else ''}...\n"
-                    f"📁 {filename}\n"
-                    f"📊 {progress_pct}%\n"
-                    f"📦 {self.humanbytes(current)}/{self.humanbytes(total)}"
-                )
-            except:
-                pass
-        
-        # Upload
-        try:
-            if AS_DOCUMENT or split_file:
-                await self.client.send_document(
-                    chat_id=chat_id,
-                    document=file_path,
-                    caption=f"📄 {filename}",
-                    progress=progress
-                )
-            else:
-                # Try as video/audio first
-                if filename.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
-                    await self.client.send_video(
-                        chat_id=chat_id,
-                        video=file_path,
-                        caption=f"🎥 {filename}",
-                        progress=progress
-                    )
-                elif filename.lower().endswith(('.mp3', '.m4a', '.flac', '.wav')):
-                    await self.client.send_audio(
-                        chat_id=chat_id,
-                        audio=file_path,
-                        caption=f"🎵 {filename}",
-                        progress=progress
-                    )
-                else:
-                    await self.client.send_document(
-                        chat_id=chat_id,
-                        document=file_path,
-                        caption=f"📄 {filename}",
-                        progress=progress
-                    )
-        
-        except Exception as e:
-            print(f"Upload error: {e}")
-            raise
-    
-    def humanbytes(self, size: int) -> str:
-        """Convert bytes to human readable format"""
-        if not size:
-            return "0B"
-        
-        size = int(size)
-        power = 2**10
-        n = 0
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        
-        while size >= power and n < len(units) - 1:
-            size /= power
-            n += 1
-        
-        return f"{size:.2f} {units[n]}"
-
-# ============= Main Bot =============
-class LeechBot:
-    def __init__(self):
-        self.client = Client(
-            "leech_bot",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            bot_token=BOT_TOKEN,
-            in_memory=True,
-            max_concurrent_transmissions=3
-        )
-        self.aria2 = Aria2Manager()
-        self.uploader = TelegramUploader(self.client)
-        self.validator = URLValidator()
-    
-    def is_owner(self, user_id: int) -> bool:
-        """Check if user is authorized"""
-        return user_id == OWNER_ID
-    
-    async def start_command(self, client: Client, message: Message):
-        """Handle /start command"""
-        if not self.is_owner(message.from_user.id):
-            await message.reply_text("❌ You are not authorized to use this bot!")
-            return
-        
-        await message.reply_text(
-            "🤖 **WZML-X Leech Bot**\n\n"
-            "Commands:\n"
-            "`/leech <link>` - Leech file to Telegram\n"
-            "`/status` - Check Aria2 status\n"
-            "`/cancel` - Cancel current task\n"
-            "`/ping` - Check bot response\n\n"
-            "Supports: Direct links, YouTube, Twitter, Instagram, Facebook, and 1000+ yt-dlp sites",
-            parse_mode=enums.ParseMode.MARKDOWN
-        )
-    
-    async def leech_command(self, client: Client, message: Message):
-        """Handle /leech command"""
-        if not self.is_owner(message.from_user.id):
-            await message.reply_text("❌ Unauthorized!")
-            return
-        
-        # Extract URL
-        if len(message.command) < 2:
-            await message.reply_text("❌ Usage: `/leech <link>`", parse_mode=enums.ParseMode.MARKDOWN)
-            return
-        
-        url = message.command[1]
-        
-        # Validate URL
-        if not self.validator.is_supported_url(url):
-            await message.reply_text("❌ Invalid or unsupported URL!")
-            return
-        
-        status_msg = await message.reply_text("🔄 Processing...")
-        
-        try:
-            # Download using Aria2
-            await status_msg.edit_text("⬇️ Starting Aria2 download...")
-            file_path = await self.aria2.download(url, status_msg)
-            
-            if not file_path or not os.path.exists(file_path):
-                raise Exception("Download failed or file not found")
-            
-            await status_msg.edit_text("✅ Download complete! Preparing upload...")
-            
-            # Check file size
-            file_size = FileManager.get_file_size(file_path)
-            
-            if file_size > 2097152000:  # 2GB Telegram limit
-                await status_msg.edit_text("⚠️ File >2GB, splitting...")
-                parts = await FileManager.split_file(file_path)
-                
-                # Upload parts
-                for i, part in enumerate(parts, 1):
-                    await status_msg.edit_text(f"⬆️ Uploading part {i}/{len(parts)}...")
-                    await self.uploader.upload_file(part, message.chat.id, status_msg, split_file=True)
-                
-                # Cleanup parts
-                for part in parts:
-                    os.remove(part)
-                
-            else:
-                # Upload single file
-                await self.uploader.upload_file(file_path, message.chat.id, status_msg)
-            
-            await status_msg.edit_text("✅ Leech completed successfully!")
-            
-            # Cleanup
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Error: {str(e)}")
-            print(f"Leech error: {e}")
-    
-    async def status_command(self, client: Client, message: Message):
-        """Check Aria2 status"""
-        if not self.is_owner(message.from_user.id):
-            return
-        
-        try:
-            stats = self.aria2.aria2.get_global_stats()
-            await message.reply_text(
-                "📊 **Aria2 Status**\n\n"
-                f"📥 Active Downloads: {stats.num_active}\n"
-                f"⌛ Waiting: {stats.num_waiting}\n"
-                f"✅ Completed: {stats.num_stopped}\n"
-                f"⚡ Download Speed: {self.uploader.humanbytes(stats.download_speed)}/s\n"
-                f"⬆️ Upload Speed: {self.uploader.humanbytes(stats.upload_speed)}/s",
-                parse_mode=enums.ParseMode.MARKDOWN
+            await message.edit_text(
+                f"📤 **Uploading**\n"
+                f"`{file_path.name[:60]}`\n"
+                f"Progress: {(current/total)*100:.1f}%"
             )
-        except Exception as e:
-            await message.reply_text(f"❌ Aria2 not connected: {e}")
-    
-    async def ping_command(self, client: Client, message: Message):
-        """Ping command"""
-        if not self.is_owner(message.from_user.id):
-            return
-        
-        start_time = time.time()
-        m = await message.reply_text("🏓 Pinging...")
-        end_time = time.time()
-        ping_time = round((end_time - start_time) * 1000, 2)
-        await m.edit_text(f"🏓 Pong! `{ping_time}ms`", parse_mode=enums.ParseMode.MARKDOWN)
-    
-    async def cancel_command(self, client: Client, message: Message):
-        """Cancel all downloads"""
-        if not self.is_owner(message.from_user.id):
-            return
         
         try:
-            downloads = self.aria2.aria2.get_downloads()
-            for download in downloads:
-                if download.is_active:
-                    download.remove(force=True)
-            await message.reply_text("✅ All active downloads cancelled!")
+            thumb = await create_thumbnail(file_path) if as_video and info['is_video'] else None
+            
+            if as_video and info['is_video']:
+                await message.reply_video(
+                    str(file_path),
+                    caption=f"<code>{file_path.name}</code>",
+                    thumb=str(thumb) if thumb else None,
+                    supports_streaming=True,
+                    progress=progress_callback
+                )
+            else:
+                await message.reply_document(
+                    str(file_path),
+                    caption=f"<code>{file_path.name}</code>",
+                    thumb=str(thumb) if thumb else None,
+                    force_document=True,
+                    progress=progress_callback
+                )
+                
+        except FloodWait as f:
+            logger.warning(f"FloodWait: {f.value}s")
+            await asyncio.sleep(f.value)
+            await upload_file(message, file_path, as_video)
         except Exception as e:
-            await message.reply_text(f"❌ Error: {e}")
-    
-    async def start_services(self):
-        """Initialize bot and Aria2"""
-        print("🚀 Starting WZML-X Leech Bot...")
-        
-        # Start Aria2 daemon
-        await self.aria2.start_aria2_daemon()
-        await self.aria2.connect()
-        
-        # Register handlers
-        self.client.on_message(filters.command("start"))(self.start_command)
-        self.client.on_message(filters.command("leech"))(self.leech_command)
-        self.client.on_message(filters.command("status"))(self.status_command)
-        self.client.on_message(filters.command("ping"))(self.ping_command)
-        self.client.on_message(filters.command("cancel"))(self.cancel_command)
-        
-        print("✅ Bot ready!")
+            logger.error(f"Upload error: {e}")
+            await message.reply(f"❌ Upload failed: `{e}`")
+        finally:
+            if thumb and thumb.exists():
+                thumb.unlink()
 
-# ============= Run Bot =============
+async def process_leech(message: Message, url: str, flags: List[str]):
+    download_dir = CONFIG['DOWNLOAD_DIR'] / str(message.id)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        as_video = 'v' in flags
+        do_zip = 'z' in flags
+        do_unzip = 'e' in flags
+        
+        status_msg = await message.reply("🔄 Starting download...")
+        
+        async with download_semaphore:
+            if url.startswith('magnet:') or url.endswith('.torrent'):
+                files = await download_torrent(url, download_dir, status_msg)
+            elif is_ytdlp_supported(url):
+                files = await download_ytdlp(url, download_dir, lambda d, t: None)
+            else:
+                filename = get_filename_from_url(url)
+                file_path = download_dir / filename
+                await download_direct(url, file_path, lambda d, t: None)
+                files = [file_path]
+            
+            if not files:
+                raise Exception("No files downloaded")
+            
+            await status_msg.edit("✅ Download complete, processing...")
+            
+            if do_zip:
+                await status_msg.edit("📦 Creating zip...")
+                zip_path = download_dir / f"{download_dir.name}.zip"
+                await create_zip(files, zip_path)
+                upload_files = [zip_path]
+            elif do_unzip:
+                await status_msg.edit("📂 Extracting...")
+                upload_files = []
+                for file in files:
+                    if get_file_info(file)['is_archive']:
+                        extracted = await extract_archive(file, download_dir / "extracted")
+                        upload_files.extend(extracted)
+                        file.unlink()
+                    else:
+                        upload_files.append(file)
+            else:
+                upload_files = files
+            
+            await status_msg.edit(f"📤 Uploading {len(upload_files)} file(s)...")
+            upload_tasks = [upload_file(message, file, as_video) for file in upload_files]
+            await asyncio.gather(*upload_tasks)
+            
+            await status_msg.edit("✅ **Leech completed!**")
+            
+    except Exception as e:
+        logger.error(f"Leech error: {e}")
+        await message.reply(f"❌ **Error:** `{e}`")
+    finally:
+        if download_dir.exists():
+            shutil.rmtree(download_dir)
+
+# ========== COMMAND HANDLERS ==========
+@bot.on_message(filters.command("leech") & filters.private)
+async def leech_handler(client: Client, message: Message):
+    if not is_allowed(message.from_user.id):
+        return await message.reply("❌ **Unauthorized**")
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.reply(
+            "📥 **Leech Usage**\n\n"
+            "`/leech <URL>` - Document\n"
+            "`/leech <URL> -v` - Video\n"
+            "`/leech <URL> -z` - ZIP\n"
+            "`/leech <URL> -e` - Extract\n"
+            "`/leech <URL> -v -z` - Combine\n\n"
+            "**Supported:** Direct links, YouTube, TikTok, Instagram, Magnet/Torrent\n\n"
+            "**Example:** `/leech https://example.com/file.zip -e -v`"
+        )
+    
+    cmd_text = args[1]
+    flags = []
+    for flag in ['-v', '-z', '-e']:
+        if flag in cmd_text:
+            flags.append(flag.replace('-', ''))
+            cmd_text = cmd_text.replace(flag, '')
+    
+    url = cmd_text.strip()
+    if not url:
+        return await message.reply("❌ No URL provided")
+    
+    asyncio.create_task(process_leech(message, url, flags))
+
+@bot.on_message(filters.command("status") & filters.private)
+async def status_handler(client: Client, message: Message):
+    if not is_allowed(message.from_user.id):
+        return
+    
+    cpu = psutil.cpu_percent(interval=1)
+    memory = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    
+    text = (
+        "🤖 **Bot Status**\n\n"
+        f"**CPU:** {cpu}%\n"
+        f"**RAM:** {memory.percent}% ({human_bytes(memory.used)}/{human_bytes(memory.total)})\n"
+        f"**Disk:** {disk.percent}% ({human_bytes(disk.used)}/{human_bytes(disk.total)})\n"
+        f"**Active Downloads:** {len(active_downloads)}\n"
+        f"**Concurrent Limit:** {CONFIG['MAX_CONCURRENT_DOWNLOADS']}"
+    )
+    await message.reply(text)
+
+@bot.on_message(filters.command("cancel") & filters.private)
+async def cancel_handler(client: Client, message: Message):
+    if not is_allowed(message.from_user.id):
+        return
+    await message.reply("⏹️ Cancel registered. Use `/leech` for new downloads.")
+
+# ========== BACKGROUND TASKS ==========
+@scheduler.scheduled_job('interval', minutes=5)
+async def keep_alive():
+    logger.info(f"Pulse | CPU: {psutil.cpu_percent()}% | Memory: {psutil.virtual_memory().percent}%")
+
+# ========== MAIN ==========
+def main():
+    uvloop.install()
+    CONFIG['DOWNLOAD_DIR'].mkdir(parents=True, exist_ok=True)
+    scheduler.start()
+    
+    async def run_services():
+        await bot.start()
+        logger.info("✅ Bot started successfully")
+        
+        port = int(os.getenv("PORT", 8000))
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="error")
+        server = uvicorn.Server(config)
+        await server.serve()
+    
+    try:
+        asyncio.run(run_services())
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+        scheduler.shutdown()
+        bot.stop()
+
 if __name__ == "__main__":
-    # Install uvloop for better performance
-    if sys.platform != "win32":
-        uvloop.install()
-    
-    # Create download directory
-    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    
-    # Initialize bot
-    bot = LeechBot()
-    
-    # Start bot
-    asyncio.run(bot.start_services())
-    bot.client.run()
+    main()
