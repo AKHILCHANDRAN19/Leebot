@@ -21,12 +21,12 @@ from fastapi import FastAPI
 import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ========== ⚠️ HARDCODED CREDENTIALS - CHANGE FOR PRODUCTION ==========
+# ========== ⚠️ HARDCODED CREDENTIALS - FOR TESTING ONLY ==========
 HARDCODED_CONFIG = {
     'API_ID': 2819362,
     'API_HASH': '578ce3d09fadd539544a327c45b55ee4',
     'BOT_TOKEN': '8024921755:AAEeckFdBxX8jDhAMhvKmCJRlwoz3drlkTs',
-    'ALLOWED_USERS': None,  # None = allow all; or set: {123456789, 987654321}
+    'ALLOWED_USERS': None,  # None = allow all users
 }
 # ========== END CREDENTIALS ==========
 
@@ -34,11 +34,10 @@ CONFIG = {
     'DOWNLOAD_DIR': Path('/tmp/downloads'),
     'MAX_CONCURRENT_DOWNLOADS': 3,
     'MAX_CONCURRENT_UPLOADS': 5,
-    'ARIA2_RPC': "http://localhost:6800/jsonrpc",  # Not used but kept for compatibility
     'QBITT_HOST': "http://localhost:8080",
     'QBITT_USER': 'admin',
     'QBITT_PASS': 'adminadmin',
-    **HARDCODED_CONFIG,  # Override with hardcoded values
+    **HARDCODED_CONFIG,
 }
 
 # ========== LOGGING ==========
@@ -54,7 +53,7 @@ async def health_check():
         "status": "alive",
         "cpu": f"{psutil.cpu_percent()}%",
         "memory": f"{psutil.virtual_memory().percent}%",
-        "downloads": len(active_downloads)
+        "active_downloads": len(active_downloads)
     }
 
 # ========== GLOBALS ==========
@@ -196,7 +195,6 @@ async def download_ytdlp(url: str, dest_dir: Path, progress_callback: Callable) 
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': False,
     }
     
     with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
@@ -420,25 +418,45 @@ async def keep_alive():
 
 # ========== MAIN ==========
 def main():
+    """Fixed: Scheduler starts INSIDE the async loop"""
     uvloop.install()
     CONFIG['DOWNLOAD_DIR'].mkdir(parents=True, exist_ok=True)
-    scheduler.start()
     
     async def run_services():
+        # ✅ CORRECT: Start scheduler after event loop is running
+        scheduler.start()
+        logger.info("✅ Scheduler started successfully")
+        
         await bot.start()
         logger.info("✅ Bot started successfully")
         
+        # Start web server for Render health checks
         port = int(os.getenv("PORT", 8000))
-        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="error")
+        config = uvicorn.Config(
+            app,
+            host="0.0.0.0",
+            port=port,
+            log_level="error",
+            access_log=False
+        )
         server = uvicorn.Server(config)
         await server.serve()
     
     try:
         asyncio.run(run_services())
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        scheduler.shutdown()
-        bot.stop()
+        logger.info("Received interrupt, shutting down...")
+    finally:
+        # Cleanup
+        try:
+            scheduler.shutdown()
+        except:
+            pass
+        try:
+            bot.stop()
+        except:
+            pass
+        logger.info("Shutdown complete.")
 
 if __name__ == "__main__":
     main()
