@@ -1,58 +1,13 @@
 services:
   - type: web
-    name: wzml-leech-bot
+    name: leech-bot
     env: python
-    plan: starter
-    
-    buildCommand: |
-      #!/bin/bash
-      set -e
-      echo "Installing system dependencies..."
-      apt-get update -qq
-      apt-get install -y -qq aria2 wget
-      
-      echo "Installing Python dependencies..."
-      pip install --upgrade pip setuptools wheel
-      pip install -r requirements.txt
-      
-      echo "Making start.sh executable..."
-      chmod +x start.sh
-      
-      echo "Build completed successfully!"
-    
-    startCommand: bash start.sh
-    
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
     envVars:
-      - key: BOT_TOKEN
-        value: 8024921755:AAEeckFdBxX8jDhAMhvKmCJRlwoz3drlkTs
-      
-      - key: TELEGRAM_API
-        value: 2819362
-      
-      - key: TELEGRAM_HASH
-        value: 578ce3d09fadd539544a327c45b55ee4
-      
-      - key: OWNER_ID
-        value: ""  # CHANGE THIS TO YOUR TELEGRAM USER ID
-      
-      - key: DOWNLOAD_DIR
-        value: /usr/src/app/downloads/
-      
-      - key: LEECH_SPLIT_SIZE
-        value: 2097152000
-      
-      - key: AS_DOCUMENT
-        value: "False"
-      
-      - key: ARIA2_RPC_PORT
-        value: "6800"
-      
-      - key: ARIA2_RPC_HOST
-        value: localhost
-    
-    disk:
-      name: downloads
-      mountPath: /usr/src/app/downloads
-      sizeGB: 10
-    
-    autoDeploy: true
+      - key: PORT
+        value: 10000
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: 3
+      - key: MAX_CONCURRENT_UPLOADS
+        value: 5
