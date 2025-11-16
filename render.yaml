@@ -1,65 +1,35 @@
 services:
   - type: web
     name: telegram-leech-bot
-    env: python
-    plan: starter  # Use 'free' for free tier (has limits)
-    buildCommand: pip install -r requirements.txt
-    startCommand: |
-      # Start aria2c daemon
-      aria2c --daemon --enable-rpc --rpc-listen-all --rpc-secret=${ARIA2_RPC_SECRET} --rpc-max-request-size=256M --seed-time=0 &
-      
-      # Start qBittorrent daemon (headless)
-      qbittorrent-nox -d --webui-port=${QB_PORT} &
-      
-      # Wait for services to start
-      sleep 5
-      
-      # Start bot
-      python bot.py
-    
-    envVars:
-      - key: API_ID
-        sync: 2819362  # Set in Render dashboard
-      
-      - key: API_HASH
-        sync: 578ce3d09fadd539544a327c45b55ee4"
-      
-      - key: BOT_TOKEN
-        sync: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
-      
-      - key: ADMIN_IDS
-        sync: false  # Your Telegram user ID
-      
-      # Aria2 settings
-      - key: ARIA2_RPC_HOST
-        value: http://localhost
-      
-      - key: ARIA2_RPC_PORT
-        value: 6800
-      
-      - key: ARIA2_RPC_SECRET
-        generateValue: true  # Auto-generate secure secret
-      
-      # qBittorrent settings
-      - key: QB_HOST
-        value: http://localhost
-      
-      - key: QB_PORT
-        value: 8080
-      
-      - key: QB_USER
-        value: admin
-      
-      - key: QB_PASS
-        generateValue: true  # Auto-generate secure password
-      
-      # Bot settings
-      - key: MAX_PARALLEL
-        value: 3
-    
+    env: docker  # Changed from 'python'
+    plan: starter
+    dockerfilePath: ./Dockerfile  # Add this
     disk:
       name: downloads
       mountPath: /tmp/downloads
-      sizeGB: 10  # Adjust as needed (max 100GB on paid plans)
-    
-    autoDeploy: false  # Manual deploy recommended
+      sizeGB: 10
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false  # Your Telegram user ID
+      - key: ARIA2_RPC_HOST
+        value: http://localhost
+      - key: ARIA2_RPC_PORT
+        value: 6800
+      - key: ARIA2_RPC_SECRET
+        generateValue: true  # Auto-generates secure secret
+      - key: QB_HOST
+        value: http://localhost
+      - key: QB_PORT
+        value: 8080
+      - key: QB_USER
+        value: admin
+      - key: QB_PASS
+        generateValue: true  # Auto-generates secure password
+      - key: MAX_PARALLEL
+        value: 3
