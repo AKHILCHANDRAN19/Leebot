@@ -1,13 +1,10 @@
 services:
   - type: web
     name: telegram-leech-bot
-    env: python
+    env: docker
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.10.0
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
     disk:
       name: downloads
       mountPath: /app/downloads
