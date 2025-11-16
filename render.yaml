@@ -1,32 +1,65 @@
 services:
   - type: web
-    name: leech-bot
-    env: docker
-    plan: free  # Change to 'starter' or 'plus' for more power
-    dockerfilePath: ./Dockerfile
+    name: telegram-leech-bot
+    env: python
+    plan: starter  # Use 'free' for free tier (has limits)
+    buildCommand: pip install -r requirements.txt
+    startCommand: |
+      # Start aria2c daemon
+      aria2c --daemon --enable-rpc --rpc-listen-all --rpc-secret=${ARIA2_RPC_SECRET} --rpc-max-request-size=256M --seed-time=0 &
+      
+      # Start qBittorrent daemon (headless)
+      qbittorrent-nox -d --webui-port=${QB_PORT} &
+      
+      # Wait for services to start
+      sleep 5
+      
+      # Start bot
+      python bot.py
+    
     envVars:
-      # REQUIRED: Telegram API Credentials
-      - key: BOT_TOKEN
-        value: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
       - key: API_ID
-        value: 2819362
+        sync: false  # Set in Render dashboard
+      
       - key: API_HASH
-        value: 578ce3d09fadd539544a327c45b55ee4
+        sync: false
       
-      # OPTIONAL: Performance tuning
-      - key: MAX_CONCURRENT_DOWNLOADS
-        value: 3
-      - key: MAX_CONCURRENT_UPLOADS
-        value: 5
+      - key: BOT_TOKEN
+        sync: false
       
-      # OPTIONAL: QBittorrent settings
-      - key: QBITT_HOST
-        value: http://localhost:8080
-      - key: QBITT_USER
+      - key: ADMIN_IDS
+        sync: false  # Your Telegram user ID
+      
+      # Aria2 settings
+      - key: ARIA2_RPC_HOST
+        value: http://localhost
+      
+      - key: ARIA2_RPC_PORT
+        value: 6800
+      
+      - key: ARIA2_RPC_SECRET
+        generateValue: true  # Auto-generate secure secret
+      
+      # qBittorrent settings
+      - key: QB_HOST
+        value: http://localhost
+      
+      - key: QB_PORT
+        value: 8080
+      
+      - key: QB_USER
         value: admin
-      - key: QBITT_PASS
-        value: adminadmin
       
-      # Render required
-      - key: PORT
-        value: 10000
+      - key: QB_PASS
+        generateValue: true  # Auto-generate secure password
+      
+      # Bot settings
+      - key: MAX_PARALLEL
+        value: 3
+    
+    disk:
+      name: downloads
+      mountPath: /tmp/downloads
+      sizeGB: 10  # Adjust as needed (max 100GB on paid plans)
+    
+    autoDeploy: false  # Manual deploy recommended
