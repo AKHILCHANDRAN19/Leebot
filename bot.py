@@ -1,472 +1,732 @@
-#!/usr/bin/env python3
 import os
+import time
+import threading
 import asyncio
-import sys
-import signal
-from pathlib import Path
-from typing import Optional, Dict, Any
-import aria2p
-from qbittorrentapi import Client as qbaClient, LoginFailed, APIConnectionError
-from telethon import TelegramClient, events, Button
-from telethon.tl.types import DocumentAttributeVideo
-from telethon.errors import RPCError, FloodWaitError
+import libtorrent as lt
 import logging
+import subprocess
+import shutil
+import re
+import math
+import psutil
+from pyrogram import Client, filters, enums
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import FloodWait, MessageNotModified
+from pathlib import Path
+from hachoir.parser import createParser
+from hachoir.metadata import extractMetadata
+from humanfriendly import format_size, parse_size
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- CONFIGURATION ---
-API_ID = int(os.getenv("API_ID", "2819362"))
-API_HASH = os.getenv("API_HASH", "578ce3d09fadd539544a327c45b55ee4")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(',')))
+# Telegram API credentials
+API_ID = 2819362
+API_HASH = "578ce3d09fadd539544a327c45b55ee4"
+BOT_TOKEN = "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0"
 
-# Validate config
-if not all([API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS]):
-    logger.error("❌ Missing required environment variables!")
-    sys.exit(1)
+# Directories
+DOWNLOAD_DIR = "./downloads"
+EXTRACT_DIR = "./extracted"
+UPLOAD_DIR = "./upload"
+Path(DOWNLOAD_DIR).mkdir(exist_ok=True)
+Path(EXTRACT_DIR).mkdir(exist_ok=True)
+Path(UPLOAD_DIR).mkdir(exist_ok=True)
 
-# Paths
-DOWNLOAD_PATH = Path("/tmp/downloads")
-DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
-MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "3"))
+# Bot configuration
+OWNER_ID = 0  # Replace with your Telegram user ID
+MAX_FILE_SIZE = 2097152000  # 2GB (Telegram's limit for premium users)
+CHUNK_SIZE = 1024 * 1024 * 5  # 5MB chunks for splitting
+SPEED_LIMIT = 0  # 0 means no speed limit (in bytes per second)
+LEECH_LOG_GROUP = None  # Replace with your log group ID if you want to log downloads
 
-# Aria2 config
-ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "http://localhost")
-ARIA2_RPC_PORT = int(os.getenv("ARIA2_RPC_PORT", "6800"))
-ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "default_secret")
+# User data
+users = {}
+downloads = {}
 
-# qBittorrent config
-QB_HOST = os.getenv("QB_HOST", "http://localhost")
-QB_PORT = int(os.getenv("QB_PORT", "8080"))
-QB_USER = os.getenv("QB_USER", "admin")
-QB_PASS = os.getenv("QB_PASS", "adminadmin")
+# Initialize Pyrogram client
+app = Client(
+    "leech_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+# Helper functions
+def get_size(size):
+    """Convert bytes to human readable format"""
+    if not size:
+        return "0B"
+    power = 1024
+    n = 0
+    power_labels = {0: '', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
+    while size > power and n < len(power_labels):
+        size /= power
+        n += 1
+    return f"{size:.2f}{power_labels[n]}B"
 
-# --- CLIENTS ---
-bot = TelegramClient('leech_bot', API_ID, API_HASH)
+def get_progress_bar(progress):
+    """Generate a progress bar"""
+    bar_length = 15
+    filled_length = int(round(bar_length * progress / 100))
+    bar = '█' * filled_length + '▁' * (bar_length - filled_length)
+    return bar
 
-def init_aria2() -> Optional[aria2p.API]:
-    """Initialize aria2c with retry logic"""
-    for attempt in range(5):
-        try:
-            client = aria2p.Client(
-                host=ARIA2_RPC_HOST,
-                port=ARIA2_RPC_PORT,
-                secret=ARIA2_RPC_SECRET,
-                timeout=30
-            )
-            api = aria2p.API(client)
-            api.get_version()
-            logger.info("✅ Aria2c connected")
-            return api
-        except Exception as e:
-            logger.warning(f"Aria2c attempt {attempt + 1}/5 failed: {e}")
-            if attempt < 4:
-                asyncio.sleep(3)
-    return None
+def is_magnet(link):
+    """Check if link is a magnet link"""
+    return link.startswith('magnet:')
 
-def init_qbittorrent() -> Optional[qbaClient]:
-    """Initialize qBittorrent with retry logic"""
-    for attempt in range(5):
-        try:
-            client = qbaClient(
-                host=QB_HOST,
-                port=QB_PORT,
-                username=QB_USER,
-                password=QB_PASS,
-                REQUESTS_ARGS={'timeout': 30}
-            )
-            client.app_version()
-            logger.info("✅ qBittorrent connected")
-            
-            # Optimize settings
-            client.application.set_preferences({
-                "max_active_downloads": MAX_PARALLEL,
-                "max_active_torrents": MAX_PARALLEL,
-                "max_active_uploads": 3,
-                "max_connec": 100,
-                "max_connec_per_torrent": 50,
-                "async_io_threads": 8,
-                "enable_dht": True,
-                "enable_lsd": True,
-                "enable_upnp": True
-            })
-            return client
-        except Exception as e:
-            logger.warning(f"qBittorrent attempt {attempt + 1}/5 failed: {e}")
-            if attempt < 4:
-                asyncio.sleep(3)
-    return None
+def is_url(link):
+    """Check if link is a URL"""
+    url_regex = re.compile(
+        r'^(?:http|ftp)s?://'  # http:// or https://
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|'  # domain...
+        r'localhost|'  # localhost...
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # ...or ip
+        r'(?::\d+)?'  # optional port
+        r'(?:/?|[/?]\S+)$', re.IGNORECASE)
+    return url_regex.match(link) is not None
 
-aria2: Optional[aria2p.API] = None
-qb: Optional[qbaClient] = None
-
-# --- DOWNLOAD TRACKER ---
-active_downloads: Dict[str, Dict[str, Any]] = {}
-
-# --- UTILITIES ---
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-def get_progress_bar(percentage: int) -> str:
-    filled = int(percentage / 100 * 12)
-    return "█" * filled + "░" * (12 - filled)
-
-def format_bytes(size: int) -> str:
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
-    return f"{size:.2f} PB"
-
-def format_speed(speed: int) -> str:
-    return format_bytes(speed) + "/s"
-
-async def cleanup_download(gid: str):
-    if gid in active_downloads:
-        del active_downloads[gid]
-
-# --- UPLOAD LOGIC ---
-async def upload_file(event, file_path: Path):
-    """Upload with progress and error recovery"""
-    if not file_path.exists():
-        return
-    
-    file_size = file_path.stat().st_size
-    if file_size > MAX_FILE_SIZE:
-        await event.reply(f"❌ File exceeds 2GB limit: {format_bytes(file_size)}")
-        file_path.unlink()
-        return
-
-    is_video = file_path.suffix.lower() in ['.mp4', '.mkv', '.avi', '.mov', '.webm']
-    
-    status_msg = await event.reply(
-        f"📤 Uploading: `{file_path.name[:40]}`...\n"
-        f"Size: {format_bytes(file_size)}"
-    )
-
-    async def progress_callback(current: int, total: int):
-        try:
-            percent = int(current / total * 100)
-            if percent % 25 == 0:
-                await status_msg.edit(
-                    f"📤 Uploading: {get_progress_bar(percent)} {percent}%"
-                )
-        except:
-            pass
-
+def extract_archive(file_path, extract_to):
+    """Extract archives in various formats"""
     try:
-        if is_video:
-            await bot.send_file(
-                event.chat_id,
-                file_path,
-                caption=f"`{file_path.name}`",
-                supports_streaming=True,
-                progress_callback=progress_callback
-            )
+        if file_path.endswith('.zip'):
+            subprocess.run(['unzip', '-o', file_path, '-d', extract_to], check=True)
+        elif file_path.endswith('.rar'):
+            subprocess.run(['unrar', 'x', '-o+', file_path, extract_to], check=True)
+        elif file_path.endswith('.tar') or file_path.endswith('.tar.gz') or file_path.endswith('.tgz'):
+            subprocess.run(['tar', '-xvf', file_path, '-C', extract_to], check=True)
+        elif file_path.endswith('.tar.bz2') or file_path.endswith('.tbz2'):
+            subprocess.run(['tar', '-xvjf', file_path, '-C', extract_to], check=True)
+        elif file_path.endswith('.tar.xz') or file_path.endswith('.txz'):
+            subprocess.run(['tar', '-xvJf', file_path, '-C', extract_to], check=True)
+        elif file_path.endswith('.7z'):
+            subprocess.run(['7z', 'x', file_path, f'-o{extract_to}'], check=True)
         else:
-            await bot.send_file(
-                event.chat_id,
-                file_path,
-                caption=f"`{file_path.name}`",
-                progress_callback=progress_callback
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Error extracting archive: {e}")
+        return False
+
+def split_file(file_path, chunk_size):
+    """Split large files into chunks"""
+    file_size = os.path.getsize(file_path)
+    parts = math.ceil(file_size / chunk_size)
+    
+    with open(file_path, 'rb') as f:
+        for i in range(parts):
+            chunk = f.read(chunk_size)
+            with open(f"{file_path}.part{i+1:03d}", 'wb') as chunk_file:
+                chunk_file.write(chunk)
+    
+    return [f"{file_path}.part{i+1:03d}" for i in range(parts)]
+
+def get_media_metadata(file_path):
+    """Get metadata for media files"""
+    try:
+        parser = createParser(file_path)
+        if not parser:
+            return None
+        
+        metadata = extractMetadata(parser)
+        return metadata
+    except Exception as e:
+        logger.error(f"Error getting metadata: {e}")
+        return None
+
+async def download_torrent(magnet_link, message, user_id):
+    """Download torrent/magnet link using libtorrent"""
+    try:
+        ses = lt.session()
+        ses.listen_port(6881)
+        ses.start_dht()
+        
+        # Optimize settings for faster downloads
+        settings = {
+            'active_downloads': 10,
+            'active_seeds': 5,
+            'active_limit': 20,
+            'connections_limit': 200,
+            'download_rate_limit': SPEED_LIMIT,
+            'upload_rate_limit': -1,  # Unlimited upload
+            'cache_size': 100,  # Cache in MB
+        }
+        ses.apply_settings(settings)
+        
+        params = {
+            'save_path': DOWNLOAD_DIR,
+            'storage_mode': lt.storage_mode_t(2),
+            'paused': False,
+            'auto_managed': True,
+            'duplicate_is_error': True
+        }
+        
+        handle = lt.add_magnet_uri(ses, magnet_link, params)
+        
+        # Initial status message
+        status_message = await message.reply("📥 Starting download...")
+        
+        # Wait for metadata to download
+        while not handle.has_metadata():
+            status = handle.status()
+            progress_text = (
+                f"📥 Downloading metadata...\n"
+                f"⚡ Speed: {get_size(status.download_rate)}/s\n"
+                f"📊 Peers: {status.num_peers}"
+            )
+            try:
+                await status_message.edit_text(progress_text)
+            except MessageNotModified:
+                pass
+            await asyncio.sleep(3)
+        
+        torrent_info = handle.get_torrent_info()
+        torrent_name = torrent_info.name()
+        torrent_size = torrent_info.total_size()
+        
+        # Update status with torrent info
+        progress_text = (
+            f"📥 {torrent_name}\n"
+            f"📏 Size: {get_size(torrent_size)}\n"
+            f"⏳ Downloading..."
+        )
+        await status_message.edit_text(progress_text)
+        
+        # Download progress
+        last_update_time = time.time()
+        start_time = time.time()
+        
+        while handle.status().state != lt.torrent_status.finished:
+            if user_id not in downloads:
+                break
+                
+            s = handle.status()
+            progress = int(s.progress * 100)
+            speed = s.download_rate
+            eta = s.time_remaining if s.time_remaining != lt.seconds(-1) else 0
+            
+            # Update progress every 3 seconds
+            current_time = time.time()
+            if current_time - last_update_time >= 3:
+                last_update_time = current_time
+                
+                elapsed = current_time - start_time
+                progress_text = (
+                    f"📥 {torrent_name}\n"
+                    f"📊 Progress: {progress}% {get_progress_bar(progress)}\n"
+                    f"⚡ Speed: {get_size(speed)}/s\n"
+                    f"⏱️ ETA: {eta//60}:{eta%60:02d}\n"
+                    f"📏 Size: {get_size(torrent_size)}\n"
+                    f"✅ Downloaded: {get_size(s.total_done)}\n"
+                    f"🌐 Peers: {s.num_peers}"
+                )
+                try:
+                    await status_message.edit_text(progress_text)
+                except MessageNotModified:
+                    pass
+            
+            await asyncio.sleep(1)
+        
+        if user_id in downloads:
+            downloads[user_id]['status'] = 'completed'
+            await status_message.edit_text(f"✅ Download completed: {torrent_name}")
+            
+            # Get downloaded files
+            files = []
+            for file_index, file_info in enumerate(torrent_info.files()):
+                file_path = os.path.join(DOWNLOAD_DIR, torrent_name, file_info.path)
+                if os.path.exists(file_path) and os.path.isfile(file_path):
+                    files.append(file_path)
+            
+            return files
+        else:
+            await status_message.edit_text("❌ Download cancelled.")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error downloading torrent: {e}")
+        await message.reply(f"❌ Error downloading torrent: {str(e)}")
+        return None
+
+async def download_direct_link(url, message, user_id):
+    """Download file from direct link using aria2c"""
+    try:
+        file_name = url.split('/')[-1]
+        if not file_name:
+            file_name = "downloaded_file"
+            
+        file_path = os.path.join(DOWNLOAD_DIR, file_name)
+        
+        # Initial status message
+        status_message = await message.reply("📥 Starting download...")
+        
+        # Use aria2c for faster downloads
+        cmd = [
+            'aria2c', 
+            '-x', '16',  # Max connections per server
+            '-s', '16',  # Split file into N pieces
+            '--max-connection-per-server', '16',
+            '--split', '16',
+            '--min-split-size', '1M',
+            '--continue', 'true',
+            '--max-tries', '0',
+            '--retry-wait', '5',
+            '--timeout', '60',
+            '--check-certificate', 'false',
+            '-d', DOWNLOAD_DIR,
+            '-o', file_name,
+            url
+        ]
+        
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        # Monitor download progress
+        last_update_time = time.time()
+        start_time = time.time()
+        
+        while process.poll() is None:
+            if user_id not in downloads:
+                process.terminate()
+                break
+                
+            # Try to get file size and downloaded amount
+            if os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                elapsed = time.time() - start_time
+                speed = file_size / elapsed if elapsed > 0 else 0
+                
+                # Update progress every 3 seconds
+                current_time = time.time()
+                if current_time - last_update_time >= 3:
+                    last_update_time = current_time
+                    
+                    progress_text = (
+                        f"📥 {file_name}\n"
+                        f"📊 Downloaded: {get_size(file_size)}\n"
+                        f"⚡ Speed: {get_size(speed)}/s\n"
+                        f"⏱️ Time: {int(elapsed)}s"
+                    )
+                    try:
+                        await status_message.edit_text(progress_text)
+                    except MessageNotModified:
+                        pass
+            
+            await asyncio.sleep(1)
+        
+        # Check if download completed
+        if process.returncode == 0 and user_id in downloads:
+            downloads[user_id]['status'] = 'completed'
+            await status_message.edit_text(f"✅ Download completed: {file_name}")
+            return [file_path]
+        elif user_id not in downloads:
+            await status_message.edit_text("❌ Download cancelled.")
+            return None
+        else:
+            stderr = process.stderr.read()
+            await status_message.edit_text(f"❌ Error downloading file: {stderr}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error downloading direct link: {e}")
+        await message.reply(f"❌ Error downloading file: {str(e)}")
+        return None
+
+async def upload_file(client, message, file_path, caption=None):
+    """Upload file to Telegram with progress tracking"""
+    try:
+        file_size = os.path.getsize(file_path)
+        file_name = os.path.basename(file_path)
+        
+        # Check if file is too large
+        if file_size > MAX_FILE_SIZE:
+            await message.reply(f"❌ File too large: {file_name} ({get_size(file_size)})\nSplitting into parts...")
+            
+            # Split file and upload parts
+            parts = split_file(file_path, CHUNK_SIZE)
+            for part_path in parts:
+                part_name = os.path.basename(part_path)
+                part_caption = f"Part {parts.index(part_path)+1} of {len(parts)}\nOriginal: {file_name}"
+                
+                await client.send_document(
+                    chat_id=message.chat.id,
+                    document=part_path,
+                    caption=part_caption,
+                    progress=upload_progress,
+                    progress_args=(message, part_name, file_size)
+                )
+                
+                # Remove part after upload
+                os.remove(part_path)
+            
+            return True
+        
+        # Get metadata for media files
+        metadata = get_media_metadata(file_path)
+        
+        # Determine file type
+        if file_path.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm')):
+            # Video file
+            width, height, duration = 0, 0, 0
+            if metadata:
+                width = metadata.get('width', 0)
+                height = metadata.get('height', 0)
+                duration = metadata.get('duration', 0)
+            
+            thumbnail_path = None
+            try:
+                # Generate thumbnail using ffmpeg
+                thumbnail_path = os.path.join(UPLOAD_DIR, f"{file_name}.jpg")
+                subprocess.run([
+                    'ffmpeg', '-i', file_path, '-ss', '00:00:01.000', '-vframes', '1', 
+                    '-vf', 'scale=320:320:force_original_aspect_ratio=decrease', 
+                    '-y', thumbnail_path
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
+            
+            await client.send_video(
+                chat_id=message.chat.id,
+                video=file_path,
+                caption=caption,
+                width=width,
+                height=height,
+                duration=duration,
+                thumb=thumbnail_path,
+                progress=upload_progress,
+                progress_args=(message, file_name, file_size)
+            )
+            
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
+                
+        elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')):
+            # Image file
+            await client.send_photo(
+                chat_id=message.chat.id,
+                photo=file_path,
+                caption=caption,
+                progress=upload_progress,
+                progress_args=(message, file_name, file_size)
+            )
+            
+        elif file_path.lower().endswith(('.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a')):
+            # Audio file
+            duration = 0
+            if metadata:
+                duration = metadata.get('duration', 0)
+            
+            thumbnail_path = None
+            try:
+                # Generate thumbnail using ffmpeg
+                thumbnail_path = os.path.join(UPLOAD_DIR, f"{file_name}.jpg")
+                subprocess.run([
+                    'ffmpeg', '-i', file_path, '-ss', '00:00:01.000', '-vframes', '1', 
+                    '-y', thumbnail_path
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                pass
+            
+            await client.send_audio(
+                chat_id=message.chat.id,
+                audio=file_path,
+                caption=caption,
+                duration=duration,
+                thumb=thumbnail_path,
+                progress=upload_progress,
+                progress_args=(message, file_name, file_size)
+            )
+            
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
+                
+        else:
+            # Document file
+            await client.send_document(
+                chat_id=message.chat.id,
+                document=file_path,
+                caption=caption,
+                progress=upload_progress,
+                progress_args=(message, file_name, file_size)
             )
         
-        await status_msg.edit("✅ Upload complete!")
-        await asyncio.sleep(1)
-        file_path.unlink()
-        await status_msg.delete()
+        return True
         
-    except FloodWaitError as e:
-        logger.warning(f"Rate limited, waiting {e.seconds}s")
-        await asyncio.sleep(e.seconds)
-        await upload_file(event, file_path)
     except Exception as e:
-        logger.error(f"Upload failed: {e}")
-        await status_msg.edit(f"❌ Upload error: {str(e)}")
-        if file_path.exists():
-            file_path.unlink()
+        logger.error(f"Error uploading file: {e}")
+        await message.reply(f"❌ Error uploading file: {str(e)}")
+        return False
 
-# --- ARIA2 MONITOR ---
-async def monitor_aria_download(gid: str, event):
-    while gid in active_downloads:
+async def upload_progress(current, total, message, file_name, file_size):
+    """Upload progress callback"""
+    try:
+        progress = int((current / total) * 100)
+        speed = current / (time.time() - uploads[message.chat.id]['start_time']) if message.chat.id in uploads else 0
+        
+        progress_text = (
+            f"📤 Uploading {file_name}\n"
+            f"📊 Progress: {progress}% {get_progress_bar(progress)}\n"
+            f"⚡ Speed: {get_size(speed)}/s\n"
+            f"✅ Uploaded: {get_size(current)} / {get_size(total)}"
+        )
+        
         try:
-            download = aria2.get_download(gid)
-            
-            if download.is_complete:
-                file_path = Path(download.files[0].path)
-                await event.edit("✅ Download complete! Uploading...")
-                await upload_file(event, file_path)
-                await cleanup_download(gid)
-                break
-            
-            if download.error_message:
-                await event.edit(f"❌ Error: {download.error_message}")
-                await cleanup_download(gid)
-                break
-            
-            if download.total_length > 0:
-                percentage = int(download.completed_length / download.total_length * 100)
-                await event.edit(
-                    f"⬇️ Aria2: `{download.name[:40]}`\n"
-                    f"{get_progress_bar(percentage)} {percentage}%\n"
-                    f"Speed: {format_speed(download.download_speed)}"
-                )
-            
-            await asyncio.sleep(2)
-        except Exception as e:
-            logger.error(f"Aria2 monitor error: {e}")
-            await event.edit(f"❌ Monitor failed: {str(e)}")
-            await cleanup_download(gid)
-            break
+            await message.edit_text(progress_text)
+        except MessageNotModified:
+            pass
+    except Exception as e:
+        logger.error(f"Error in upload progress: {e}")
 
-# --- QBITTORRENT MONITOR ---
-async def monitor_qb_download(torrent_hash: str, event):
-    while torrent_hash in active_downloads:
-        try:
-            torrents = qb.torrents.info(torrent_hashes=torrent_hash)
-            if not torrents:
-                await cleanup_download(torrent_hash)
-                break
-            
-            torrent = torrents[0]
-            
-            if torrent.state_enum.is_complete:
-                await event.edit("✅ Download complete! Uploading...")
-                
-                save_path = Path(torrent.save_path)
-                for file_info in qb.torrents_files(torrent_hash=torrent_hash):
-                    file_path = save_path / file_info.name
-                    if file_path.exists() and file_path.stat().st_size > 0:
-                        await upload_file(event, file_path)
-                
-                qb.torrents.delete(delete_files=True, torrent_hashes=torrent_hash)
-                await cleanup_download(torrent_hash)
-                break
-            
-            if torrent.state_enum.errored:
-                await event.edit(f"❌ Error: {torrent.state}")
-                qb.torrents.delete(delete_files=True, torrent_hashes=torrent_hash)
-                await cleanup_download(torrent_hash)
-                break
-            
-            progress = torrent.progress * 100
-            if progress > 0:
-                await event.edit(
-                    f"⬇️ qBittorrent: `{torrent.name[:40]}`\n"
-                    f"{get_progress_bar(int(progress))} {progress:.1f}%\n"
-                    f"Speed: {format_speed(torrent.dlspeed)}"
-                )
-            
-            await asyncio.sleep(3)
-        except Exception as e:
-            logger.error(f"qBittorrent monitor error: {e}")
-            await event.edit(f"❌ Monitor failed: {str(e)}")
-            qb.torrents.delete(delete_files=True, torrent_hashes=torrent_hash)
-            await cleanup_download(torrent_hash)
-            break
-
-# --- BOT EVENT HANDLERS ---
-@bot.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    if not is_admin(event.sender_id):
-        return
-    
-    await event.reply(
-        "🤖 **Leech Bot Ready!**\n\n"
-        "`/aria <url>` - aria2c download\n"
-        "`/qb <magnet>` - qBittorrent\n"
-        "`/cancel <id>` - Cancel\n"
-        "`/status` - Active downloads\n"
-        "`/stats` - System stats",
-        buttons=[
-            [Button.inline("📊 Status", b"status")],
-            [Button.inline("📈 Stats", b"stats")]
-        ]
+# Bot command handlers
+@app.on_message(filters.command("start"))
+async def start_command(client, message):
+    """Handle /start command"""
+    await message.reply(
+        "🎉 Welcome to the Advanced Torrent Leech Bot!\n\n"
+        "Features:\n"
+        "• Fast torrent/magnet downloads\n"
+        "• Direct link downloads\n"
+        "• Archive extraction (ZIP, RAR, 7Z, TAR, etc.)\n"
+        "• File splitting for large files\n"
+        "• Progress tracking\n"
+        "• Thumbnail generation\n\n"
+        "Commands:\n"
+        "/start - Start the bot\n"
+        "/help - Show help\n"
+        "/leech <url|magnet> - Leech from URL or magnet link\n"
+        "/cancel - Cancel current download\n"
+        "/status - Check download status\n"
+        "/cleartemp - Clear temporary files"
     )
 
-@bot.on(events.NewMessage(pattern='/aria'))
-async def aria_handler(event):
-    if not is_admin(event.sender_id) or not aria2:
-        return
-    
-    try:
-        link = event.raw_text.split(maxsplit=1)[1]
-        status_msg = await event.reply("🔄 Processing...")
-        
-        download = aria2.add_magnet(link) if link.startswith('magnet:') else aria2.add_urlp(link)
-        
-        active_downloads[download.gid] = {'type': 'aria2', 'event': status_msg}
-        asyncio.create_task(monitor_aria_download(download.gid, status_msg))
-        
-    except Exception as e:
-        await event.reply(f"❌ Failed: {str(e)}")
+@app.on_message(filters.command("help"))
+async def help_command(client, message):
+    """Handle /help command"""
+    await message.reply(
+        "📖 Help:\n\n"
+        "1. Send a torrent file, magnet link, or direct URL\n"
+        "2. Wait for the download to complete\n"
+        "3. Receive the downloaded files\n\n"
+        "Commands:\n"
+        "/leech <url|magnet> - Leech from URL or magnet link\n"
+        "/cancel - Cancel current download\n"
+        "/status - Check download status\n"
+        "/cleartemp - Clear temporary files\n\n"
+        "Tips:\n"
+        "• For archives, the bot will automatically extract them\n"
+        "• Large files will be split into parts\n"
+        "• You can send multiple links to create a queue"
+    )
 
-@bot.on(events.NewMessage(pattern='/qb'))
-async def qb_handler(event):
-    if not is_admin(event.sender_id) or not qb:
+@app.on_message(filters.command("leech"))
+async def leech_command(client, message):
+    """Handle /leech command"""
+    if len(message.command) < 2:
+        await message.reply("❌ Please provide a URL or magnet link.\nUsage: /leech <url|magnet>")
         return
     
+    url = message.command[1]
+    await process_link(client, message, url)
+
+@app.on_message(filters.command("cancel"))
+async def cancel_command(client, message):
+    """Handle /cancel command"""
+    user_id = message.from_user.id
+    if user_id in downloads:
+        downloads[user_id]['status'] = 'cancelled'
+        await message.reply("⏹️ Download will be cancelled shortly...")
+    else:
+        await message.reply("❌ No active download to cancel.")
+
+@app.on_message(filters.command("status"))
+async def status_command(client, message):
+    """Handle /status command"""
+    user_id = message.from_user.id
+    if user_id in downloads:
+        download = downloads[user_id]
+        status = download.get('status', 'Unknown')
+        await message.reply(f"📊 Download Status: {status}")
+    else:
+        await message.reply("❌ No active download.")
+
+@app.on_message(filters.command("cleartemp"))
+async def clear_temp_command(client, message):
+    """Handle /cleartemp command"""
     try:
-        link = event.raw_text.split(maxsplit=1)[1]
-        if not link.startswith('magnet:'):
-            await event.reply("❌ Only magnet links!")
+        # Clean up download directory
+        for item in os.listdir(DOWNLOAD_DIR):
+            item_path = os.path.join(DOWNLOAD_DIR, item)
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+        
+        # Clean up extract directory
+        for item in os.listdir(EXTRACT_DIR):
+            item_path = os.path.join(EXTRACT_DIR, item)
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+        
+        # Clean up upload directory
+        for item in os.listdir(UPLOAD_DIR):
+            item_path = os.path.join(UPLOAD_DIR, item)
+            if os.path.isfile(item_path):
+                os.remove(item_path)
+        
+        await message.reply("✅ Temporary files cleared successfully!")
+    except Exception as e:
+        await message.reply(f"❌ Error clearing temporary files: {str(e)}")
+
+@app.on_message(filters.document & (filters.regex(r'\.torrent$') | filters.regex(r'\.magnet$')))
+async def handle_torrent_file(client, message):
+    """Handle torrent files"""
+    try:
+        file_path = await message.download()
+        
+        if file_path.endswith('.magnet'):
+            with open(file_path, 'r') as f:
+                magnet_link = f.read().strip()
+            os.remove(file_path)
+            await process_link(client, message, magnet_link)
+        else:
+            info = lt.torrent_info(file_path)
+            magnet_link = lt.make_magnet_uri(info)
+            os.remove(file_path)
+            await process_link(client, message, magnet_link)
+    except Exception as e:
+        await message.reply(f"❌ Error processing torrent file: {str(e)}")
+
+@app.on_message(filters.text & ~filters.command())
+async def handle_text_message(client, message):
+    """Handle text messages (URLs and magnet links)"""
+    text = message.text.strip()
+    
+    if is_magnet(text) or is_url(text):
+        await process_link(client, message, text)
+    else:
+        # Not a valid link
+        pass
+
+async def process_link(client, message, link):
+    """Process torrent/magnet link or direct URL"""
+    user_id = message.from_user.id
+    
+    # Check if user already has an active download
+    if user_id in downloads and downloads[user_id]['status'] == 'downloading':
+        await message.reply("❌ You already have an active download. Please wait for it to complete or use /cancel to cancel it.")
+        return
+    
+    # Initialize download tracking
+    downloads[user_id] = {
+        'status': 'downloading',
+        'message': message
+    }
+    
+    try:
+        files = []
+        
+        if is_magnet(link):
+            # Download torrent/magnet
+            files = await download_torrent(link, message, user_id)
+        elif is_url(link):
+            # Download direct link
+            files = await download_direct_link(link, message, user_id)
+        else:
+            await message.reply("❌ Invalid link. Please provide a valid magnet link or URL.")
             return
         
-        status_msg = await event.reply("🔄 Processing...")
+        if not files or user_id not in downloads:
+            return
         
-        qb.torrents.add(urls=link, save_path=str(DOWNLOAD_PATH))
-        await asyncio.sleep(2)
-        
-        torrents = qb.torrents.info(sort_by='added_on', reverse=True, limit=1)
-        if torrents:
-            torrent_hash = torrents[0].hash
-            active_downloads[torrent_hash] = {'type': 'qb', 'event': status_msg}
-            asyncio.create_task(monitor_qb_download(torrent_hash, status_msg))
-        else:
-            await status_msg.edit("❌ Failed to add torrent")
-            
-    except Exception as e:
-        await event.reply(f"❌ Failed: {str(e)}")
-
-@bot.on(events.NewMessage(pattern='/cancel'))
-async def cancel_handler(event):
-    if not is_admin(event.sender_id):
-        return
-    
-    try:
-        dl_id = event.raw_text.split(maxsplit=1)[1]
-        if dl_id in active_downloads:
-            if active_downloads[dl_id]['type'] == 'aria2':
-                aria2.remove(dl_id, force=True)
-            else:
-                qb.torrents.delete(delete_files=True, torrent_hashes=dl_id)
-            
-            await event.reply(f"✅ Cancelled: `{dl_id}`")
-            await cleanup_download(dl_id)
-        else:
-            await event.reply("❌ ID not found")
-    except Exception as e:
-        await event.reply(f"❌ Error: {str(e)}")
-
-@bot.on(events.NewMessage(pattern='/status'))
-async def status_handler(event):
-    if not is_admin(event.sender_id):
-        return
-    
-    if not active_downloads:
-        await event.reply("📊 No active downloads")
-        return
-    
-    text = "📊 **Active Downloads:**\n\n"
-    for gid, info in active_downloads.items():
-        text += f"`{gid}` ({info['type']})\n"
-    
-    await event.reply(text)
-
-@bot.on(events.NewMessage(pattern='/stats'))
-async def stats_handler(event):
-    if not is_admin(event.sender_id):
-        return
-    
-    text = "📈 **Stats:**\n\n"
-    
-    if aria2:
-        try:
-            stats = aria2.get_global_stats()
-            text += f"**Aria2:** {stats.num_active} active\n"
-        except:
-            text += "**Aria2:** Offline\n"
-    
-    if qb:
-        try:
-            info = qb.transfer_info()
-            text += f"**qBittorrent:** {len(qb.torrents.info())} torrents\n"
-        except:
-            text += "**qBittorrent:** Offline\n"
-    
-    await event.reply(text)
-
-@bot.on(events.NewMessage(incoming=True, func=lambda e: e.document))
-async def torrent_file_handler(event):
-    if not is_admin(event.sender_id) or not qb:
-        return
-    
-    if event.document.mime_type == "application/x-bittorrent":
-        try:
-            status_msg = await event.reply("📥 Processing torrent file...")
-            
-            torrent_path = DOWNLOAD_PATH / f"{event.document.id}.torrent"
-            await event.download_media(file=torrent_path)
-            
-            qb.torrents.add(torrent_files=str(torrent_path), save_path=str(DOWNLOAD_PATH))
-            torrent_path.unlink()
-            
-            await asyncio.sleep(2)
-            torrents = qb.torrents.info(sort_by='added_on', reverse=True, limit=1)
-            
-            if torrents:
-                torrent_hash = torrents[0].hash
-                active_downloads[torrent_hash] = {'type': 'qb', 'event': status_msg}
-                asyncio.create_task(monitor_qb_download(torrent_hash, status_msg))
-            else:
-                await status_msg.edit("❌ Failed")
+        # Process downloaded files
+        for file_path in files:
+            if user_id not in downloads:
+                break
                 
-        except Exception as e:
-            await event.reply(f"❌ Error: {str(e)}")
-
-# --- MAIN STARTUP ---
-async def startup():
-    """Initialize everything"""
-    logger.info("=" * 60)
-    logger.info("🚀 Initializing Telegram Leech Bot")
-    logger.info("=" * 60)
-    
-    global aria2, qb
-    
-    # Initialize clients
-    aria2 = init_aria2()
-    qb = init_qbittorrent()
-    
-    if not aria2 and not qb:
-        logger.error("❌ CRITICAL: No download clients available!")
-        sys.exit(1)
-    
-    # Test Telegram connection
-    try:
-        me = await bot.get_me()
-        logger.info(f"✅ Bot logged in as @{me.username}")
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            
+            # Check if file is an archive
+            if file_name.lower().endswith(('.zip', '.rar', '.7z', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz')):
+                await message.reply(f"📦 Extracting archive: {file_name}")
+                
+                # Create extraction directory
+                extract_dir = os.path.join(EXTRACT_DIR, f"{user_id}_{int(time.time())}")
+                os.makedirs(extract_dir, exist_ok=True)
+                
+                # Extract archive
+                if extract_archive(file_path, extract_dir):
+                    # Get extracted files
+                    extracted_files = []
+                    for root, _, files in os.walk(extract_dir):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            if os.path.isfile(file_path):
+                                extracted_files.append(file_path)
+                    
+                    # Upload extracted files
+                    for extracted_file in extracted_files:
+                        if user_id not in downloads:
+                            break
+                            
+                        extracted_name = os.path.basename(extracted_file)
+                        await message.reply(f"📤 Uploading extracted file: {extracted_name}")
+                        
+                        # Initialize upload tracking
+                        uploads[message.chat.id] = {
+                            'start_time': time.time()
+                        }
+                        
+                        await upload_file(client, message, extracted_file)
+                    
+                    # Clean up extraction directory
+                    shutil.rmtree(extract_dir)
+                else:
+                    await message.reply(f"❌ Failed to extract archive: {file_name}")
+                    # Upload original archive if extraction failed
+                    uploads[message.chat.id] = {
+                        'start_time': time.time()
+                    }
+                    await upload_file(client, message, file_path)
+            else:
+                # Not an archive, upload directly
+                await message.reply(f"📤 Uploading file: {file_name}")
+                
+                # Initialize upload tracking
+                uploads[message.chat.id] = {
+                    'start_time': time.time()
+                }
+                
+                await upload_file(client, message, file_path)
+            
+            # Remove original file after processing
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        # Clean up download tracking
+        if user_id in downloads:
+            del downloads[user_id]
+            
+        await message.reply("✅ All files uploaded successfully!")
+        
     except Exception as e:
-        logger.error(f"❌ Telegram auth failed: {e}")
-        sys.exit(1)
-    
-    logger.info(f"✅ Ready! Admin IDs: {ADMIN_IDS}")
-    logger.info("=" * 60)
+        logger.error(f"Error processing link: {e}")
+        await message.reply(f"❌ Error processing link: {str(e)}")
+        
+        # Clean up download tracking
+        if user_id in downloads:
+            del downloads[user_id]
 
-def graceful_shutdown(signum, frame):
-    """Handle termination signals"""
-    logger.info("Received shutdown signal")
-    asyncio.create_task(shutdown())
+# Global variables for tracking
+downloads = {}
+uploads = {}
 
-async def shutdown():
-    """Cleanup on exit"""
-    logger.info("Cleaning up downloads...")
-    for gid in list(active_downloads.keys()):
-        await cleanup_download(gid)
-    await bot.disconnect()
-    logger.info("Shutdown complete")
-
-# Signal handlers
-signal.signal(signal.SIGTERM, graceful_shutdown)
-signal.signal(signal.SIGINT, graceful_shutdown)
-
-# Run startup
-with bot:
-    bot.loop.run_until_complete(startup())
-    bot.run_until_disconnected()
+# Start the bot
+if __name__ == "__main__":
+    app.run()
