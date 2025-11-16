@@ -1,13 +1,13 @@
 services:
   - type: web
     name: telegram-leech-bot
-    env: docker  # Changed from 'python'
+    env: docker
     plan: starter
-    dockerfilePath: ./Dockerfile  # Add this
+    dockerfilePath: ./Dockerfile
     disk:
       name: downloads
       mountPath: /tmp/downloads
-      sizeGB: 10
+      sizeGB: 10  # Increase if needed (max 100GB on paid)
     envVars:
       - key: API_ID
         sync: false
@@ -16,13 +16,13 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_IDS
-        sync: false  # Your Telegram user ID
+        sync: false  # Get from @userinfobot
       - key: ARIA2_RPC_HOST
         value: http://localhost
       - key: ARIA2_RPC_PORT
         value: 6800
       - key: ARIA2_RPC_SECRET
-        generateValue: true  # Auto-generates secure secret
+        generateValue: true  # Auto-generate secure secret
       - key: QB_HOST
         value: http://localhost
       - key: QB_PORT
@@ -30,6 +30,7 @@ services:
       - key: QB_USER
         value: admin
       - key: QB_PASS
-        generateValue: true  # Auto-generates secure password
+        generateValue: true
       - key: MAX_PARALLEL
         value: 3
+    autoDeploy: false
