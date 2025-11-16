@@ -5,17 +5,16 @@ RUN apt-get update && apt-get install -y \
     aria2 \
     unzip \
     p7zip-full \
-    p7zip-rar \
     ffmpeg \
     libtorrent-rasterbar-dev \
     python3-dev \
     build-essential \
-    curl \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Install unrar from official source (for better RAR support)
-RUN wget https://www.rarlab.com/rar/unrar-6.2.12.tar.gz && \
+# Install unrar by compiling it from the official source.
+# This is the most reliable method and bypasses repository issues.
+RUN wget --no-check-certificate https://www.rarlab.com/rar/unrar-6.2.12.tar.gz && \
     tar -xzvf unrar-6.2.12.tar.gz && \
     cd unrar && \
     make && \
