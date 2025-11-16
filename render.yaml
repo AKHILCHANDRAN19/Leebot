@@ -1,36 +1,14 @@
 services:
   - type: web
     name: telegram-leech-bot
-    env: docker
-    plan: starter
-    dockerfilePath: ./Dockerfile
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
     disk:
       name: downloads
-      mountPath: /tmp/downloads
-      sizeGB: 10  # Increase if needed (max 100GB on paid)
-    envVars:
-      - key: API_ID
-        sync: false
-      - key: API_HASH
-        sync: false
-      - key: BOT_TOKEN
-        sync: false
-      - key: ADMIN_IDS
-        sync: false  # Get from @userinfobot
-      - key: ARIA2_RPC_HOST
-        value: http://localhost
-      - key: ARIA2_RPC_PORT
-        value: 6800
-      - key: ARIA2_RPC_SECRET
-        generateValue: true  # Auto-generate secure secret
-      - key: QB_HOST
-        value: http://localhost
-      - key: QB_PORT
-        value: 8080
-      - key: QB_USER
-        value: admin
-      - key: QB_PASS
-        generateValue: true
-      - key: MAX_PARALLEL
-        value: 3
-    autoDeploy: false
+      mountPath: /app/downloads
+      sizeGB: 10
