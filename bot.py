@@ -16,6 +16,8 @@ from pathlib import Path
 from hachoir.parser import createParser
 from hachoir.metadata import extractMetadata
 from humanfriendly import format_size, parse_size
+from flask import Flask
+import threading
 
 # Configure logging
 logging.basicConfig(
@@ -725,5 +727,20 @@ async def process_link(client, message, link):
             del downloads[user_id]
 
 # Start the bot
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def index():
+    return "Bot is running!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host='0.0.0.0', port=port)
+
 if __name__ == "__main__":
+    # Start the web server in a separate thread
+    web_thread = threading.Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
+
     app.run()
