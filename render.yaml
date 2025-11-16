@@ -19,13 +19,13 @@ services:
     
     envVars:
       - key: API_ID
-        sync: false  # Set in Render dashboard
+        sync: 2819362  # Set in Render dashboard
       
       - key: API_HASH
-        sync: false
+        sync: 578ce3d09fadd539544a327c45b55ee4"
       
       - key: BOT_TOKEN
-        sync: false
+        sync: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
       
       - key: ADMIN_IDS
         sync: false  # Your Telegram user ID
