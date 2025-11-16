@@ -20,9 +20,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID", "2819362"))
+API_HASH = os.getenv("API_HASH", "578ce3d09fadd539544a327c45b55ee4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(',')))
 
 # Validate config
