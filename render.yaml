@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: worker  # CHANGE THIS from "web" to "worker"
     name: leech-bot-pro
     env: python
     buildCommand: |
@@ -22,6 +22,6 @@ services:
         value: 1
     disk:
       name: downloads
-      mountPath: /app/downloads
+      mountPath: /opt/render/project/src/downloads
       sizeGB: 50
     plan: starter
