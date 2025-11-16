@@ -1,3 +1,4 @@
 pyrogram
 flask
 tgcrypto
+Werkzeug==2.0.3
