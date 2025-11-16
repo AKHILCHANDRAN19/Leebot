@@ -1,484 +1,434 @@
 import os
 import asyncio
-import logging
-import time
-import shutil
-from pathlib import Path
-from typing import List, Optional, Callable
+import tempfile
 import aiofiles
-import aiohttp
-from pyrogram import Client, filters, enums
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
-import yt_dlp
-import aioqbt
-import psutil
-from tenacity import retry, stop_after_attempt, wait_exponential
-from PIL import Image
-import magic
-import uvloop
-from fastapi import FastAPI
-import uvicorn
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import aria2p
+from qbittorrentapi import Client as qbaClient
+from telethon import TelegramClient, events, Button
+from telethon.tl.types import DocumentAttributeVideo
+from pathlib import Path
 
-# ========== ⚠️ MOVE TO ENVIRONMENT VARIABLES! ==========
-HARDCODED_CONFIG = {
-    'API_ID': int(os.getenv('API_ID', '2819362')),
-    'API_HASH': os.getenv('API_HASH', '578ce3d09fadd539544a327c45b55ee4'),
-    'BOT_TOKEN': os.getenv('BOT_TOKEN', '8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0'),
-    'ALLOWED_USERS': None,  # "123456,789012" or None for all
-}
-# ========== END CREDENTIALS ==========
+# --- CONFIGURATION ---
+API_ID = int(os.getenv("API_ID", "2819362"))
+API_HASH = os.getenv("API_HASH", "578ce3d09fadd539544a327c45b55ee4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0")
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "123456789").split(',')))  # CHANGE THIS
 
-CONFIG = {
-    'DOWNLOAD_DIR': Path('/tmp/downloads'),
-    'MAX_CONCURRENT_DOWNLOADS': int(os.getenv('MAX_CONCURRENT_DOWNLOADS', 3)),
-    'MAX_CONCURRENT_UPLOADS': int(os.getenv('MAX_CONCURRENT_UPLOADS', 5)),
-    'QBITT_HOST': os.getenv('QBITT_HOST', "http://localhost:8080"),
-    'QBITT_USER': os.getenv('QBITT_USER', 'admin'),
-    'QBITT_PASS': os.getenv('QBITT_PASS', 'adminadmin'),
-    **HARDCODED_CONFIG,
-}
+# Aria2c config
+ARIA2_RPC_HOST = os.getenv("ARIA2_RPC_HOST", "http://localhost")
+ARIA2_RPC_PORT = int(os.getenv("ARIA2_RPC_PORT", "6800"))
+ARIA2_RPC_SECRET = os.getenv("ARIA2_RPC_SECRET", "your_secret")
 
-# ========== LOGGING ==========
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
+# qBittorrent config
+QB_HOST = os.getenv("QB_HOST", "http://localhost")
+QB_PORT = int(os.getenv("QB_PORT", "8080"))
+QB_USER = os.getenv("QB_USER", "admin")
+QB_PASS = os.getenv("QB_PASS", "adminadmin")
+
+# Bot config
+DOWNLOAD_PATH = Path("/tmp/downloads")
+MAX_PARALLEL = int(os.getenv("MAX_PARALLEL", "3"))
+
+# --- CLIENTS ---
+bot = TelegramClient('leech_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+aria2 = aria2p.Client(
+    host=ARIA2_RPC_HOST,
+    port=ARIA2_RPC_PORT,
+    secret=ARIA2_RPC_SECRET
 )
-logger = logging.getLogger(__name__)
+aria2_api = aria2p.API(aria2)
 
-# ========== FASTAPI ==========
-app = FastAPI(title="Leech Bot API")
-
-@app.get("/")
-async def health_check():
-    return {
-        "status": "alive",
-        "bot_running": bot.is_connected if hasattr(bot, 'is_connected') else False,
-        "cpu": f"{psutil.cpu_percent()}%",
-        "memory": f"{psutil.virtual_memory().percent}%",
-        "active_downloads": len(active_downloads),
-        "timestamp": time.time()
-    }
-
-# ========== GLOBALS ==========
-bot = Client(
-    "leech_bot",
-    api_id=CONFIG['API_ID'],
-    api_hash=CONFIG['API_HASH'],
-    bot_token=CONFIG['BOT_TOKEN'],
-    workers=100,
-    max_concurrent_transmissions=CONFIG['MAX_CONCURRENT_UPLOADS']
+qb = qbaClient(
+    host=QB_HOST,
+    port=QB_PORT,
+    username=QB_USER,
+    password=QB_PASS
 )
 
-download_semaphore = asyncio.Semaphore(CONFIG['MAX_CONCURRENT_DOWNLOADS'])
-upload_semaphore = asyncio.Semaphore(CONFIG['MAX_CONCURRENT_UPLOADS'])
+# --- ACTIVE DOWNLOADS ---
 active_downloads = {}
-scheduler = AsyncIOScheduler()
 
-# ========== UTILITY FUNCTIONS ==========
-def is_allowed(user_id: int) -> bool:
-    if CONFIG['ALLOWED_USERS'] is None:
-        return True
-    return str(user_id) in CONFIG['ALLOWED_USERS'].split(',')
+# --- UTILS ---
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
-def human_bytes(size: int) -> str:
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
-    return f"{size:.2f} PB"
+def get_progress_bar(percentage):
+    bar_length = 10
+    filled = int(percentage / 100 * bar_length)
+    return "█" * filled + "░" * (bar_length - filled)
 
-def get_file_info(file_path: Path) -> dict:
-    mime = magic.from_file(str(file_path), mime=True)
-    return {
-        'name': file_path.name,
-        'size': file_path.stat().st_size,
-        'mime': mime,
-        'is_video': mime.startswith('video/'),
-        'is_archive': mime in [
-            'application/zip', 'application/x-7z-compressed',
-            'application/x-rar', 'application/x-tar',
-            'application/gzip', 'application/x-bzip2'
-        ]
-    }
-
-def get_filename_from_url(url: str) -> str:
-    from urllib.parse import urlparse, unquote
-    path = urlparse(url).path
-    return Path(unquote(path)).name or f"download_{int(time.time())}.bin"
-
-def is_ytdlp_supported(url: str) -> bool:
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-            ydl.extract_info(url, download=False)
-            return True
-    except:
-        return False
-
-async def create_thumbnail(video_path: Path) -> Optional[Path]:
-    thumb_path = video_path.with_suffix('.jpg')
-    try:
-        process = await asyncio.create_subprocess_exec(
-            'ffmpeg', '-i', str(video_path), '-ss', '00:00:01',
-            '-vframes', '1', '-vf', 'scale=320:-1', str(thumb_path),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        await process.wait()
-        if thumb_path.exists():
-            return thumb_path
-    except Exception as e:
-        logger.error(f"Thumbnail failed: {e}")
-    return None
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-async def download_direct(url: str, dest: Path, progress_callback: Callable):
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0)) as session:
-        async with session.get(url, raise_for_status=True) as response:
-            total = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            async with aiofiles.open(dest, 'wb') as f:
-                async for chunk in response.content.iter_chunked(1024*1024):
-                    if chunk:
-                        await f.write(chunk)
-                        downloaded += len(chunk)
-                        await progress_callback(downloaded, total)
-
-async def download_ytdlp(url: str, dest_dir: Path, progress_callback: Callable) -> List[Path]:
-    files = []
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            downloaded = d.get('downloaded_bytes', 0)
-            asyncio.create_task(progress_callback(downloaded, total))
+async def upload_file(event, file_path):
+    """Upload file to Telegram with progress"""
+    file_path = Path(file_path)
+    if not file_path.exists():
+        return
     
-    ytdl_opts = {
-        'outtmpl': str(dest_dir / '%(title)s.%(ext)s'),
-        'progress_hooks': [progress_hook],
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-    }
+    await event.reply(f"📤 Uploading: `{file_path.name}`")
     
-    with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if 'entries' in info:
-            for entry in info['entries']:
-                if entry:
-                    file = dest_dir / f"{entry['title']}.{entry['ext']}"
-                    if file.exists():
-                        files.append(file)
-        else:
-            file = dest_dir / f"{info['title']}.{info['ext']}"
-            if file.exists():
-                files.append(file)
-    return files
-
-async def download_torrent(url: str, dest_dir: Path, progress_msg: Message) -> List[Path]:
     try:
-        async with aioqbt.Client(CONFIG['QBITT_HOST'], username=CONFIG['QBITT_USER'], password=CONFIG['QBITT_PASS']) as qb:
-            if url.startswith('magnet:'):
-                await qb.torrents.add(magnet_urls=[url], save_path=str(dest_dir))
-            else:
-                torrent_file = dest_dir / "temp.torrent"
-                await download_direct(url, torrent_file, lambda d, t: None)
-                with open(torrent_file, 'rb') as f:
-                    await qb.torrents.add(torrent_files=f.read(), save_path=str(dest_dir))
-                torrent_file.unlink()
-            
-            await asyncio.sleep(2)
-            torrents = await qb.torrents.info()
-            torrent = max(torrents, key=lambda t: t.added_on)
-            
-            while torrent.state not in ['uploading', 'pausedUP', 'stalledUP']:
-                torrent = await qb.torrents.info(torrent_hash=torrent.hash)
-                if torrent.state in ['error', 'missingFiles']:
-                    raise Exception("Torrent failed")
-                
-                progress = torrent.progress * 100
-                await progress_msg.edit_text(
-                    f"🌀 **Torrent**\n{torrent.name[:50]}\nProgress: {progress:.1f}%"
-                )
-                await asyncio.sleep(2)
-            
-            return [f for f in dest_dir.rglob('*') if f.is_file() and not f.name.endswith('.!qB')]
-    except Exception as e:
-        logger.error(f"Torrent error: {e}")
-        raise
-
-async def upload_file(message: Message, file_path: Path, as_video: bool = False):
-    async with upload_semaphore:
-        info = get_file_info(file_path)
-        progress_data = {'last_update': 0}
+        # Get file size
+        file_size = file_path.stat().st_size
         
-        async def progress_callback(current: int, total: int):
-            now = time.time()
-            if now - progress_data['last_update'] < 5:
-                return
-            progress_data['last_update'] = now
-            await message.edit_text(
-                f"📤 **Uploading**\n`{file_path.name[:60]}`\nProgress: {(current/total)*100:.1f}%"
+        # Upload with progress
+        async def progress_callback(current, total):
+            percent = int(current / total * 100)
+            if percent % 20 == 0:  # Update every 20%
+                await event.edit(f"📤 Uploading: `{file_path.name}`\n{get_progress_bar(percent)} {percent}%")
+        
+        # Check if it's a video
+        is_video = file_path.suffix.lower() in ['.mp4', '.mkv', '.avi', '.mov']
+        
+        if is_video:
+            await bot.send_file(
+                event.chat_id,
+                file_path,
+                caption=f"`{file_path.name}`",
+                supports_streaming=True,
+                progress_callback=progress_callback
+            )
+        else:
+            await bot.send_file(
+                event.chat_id,
+                file_path,
+                caption=f"`{file_path.name}`",
+                progress_callback=progress_callback
             )
         
-        try:
-            thumb = await create_thumbnail(file_path) if as_video and info['is_video'] else None
-            
-            if as_video and info['is_video']:
-                await message.reply_video(
-                    str(file_path),
-                    caption=f"<code>{file_path.name}</code>",
-                    thumb=str(thumb) if thumb else None,
-                    supports_streaming=True,
-                    progress=progress_callback
-                )
-            else:
-                await message.reply_document(
-                    str(file_path),
-                    caption=f"<code>{file_path.name}</code>",
-                    thumb=str(thumb) if thumb else None,
-                    force_document=True,
-                    progress=progress_callback
-                )
-        except FloodWait as f:
-            logger.warning(f"FloodWait: {f.value}s")
-            await asyncio.sleep(f.value)
-            await upload_file(message, file_path, as_video)
-        except Exception as e:
-            logger.error(f"Upload error: {e}")
-            await message.reply(f"❌ Upload failed: `{e}`")
-        finally:
-            if thumb and thumb.exists():
-                thumb.unlink()
+        # Clean up after upload
+        await asyncio.sleep(1)
+        file_path.unlink()
+        
+    except Exception as e:
+        await event.reply(f"❌ Upload failed: {str(e)}")
 
-async def process_leech(message: Message, url: str, flags: List[str]):
-    download_dir = CONFIG['DOWNLOAD_DIR'] / str(message.id)
-    download_dir.mkdir(parents=True, exist_ok=True)
-    
+# --- ARIA2 HANDLERS ---
+async def check_aria_progress(gid, event):
+    """Monitor aria2c download progress"""
     try:
-        as_video = 'v' in flags
-        do_zip = 'z' in flags
-        do_unzip = 'e' in flags
-        
-        status_msg = await message.reply("🔄 Starting download...")
-        
-        async with download_semaphore:
-            if url.startswith('magnet:') or url.endswith('.torrent'):
-                files = await download_torrent(url, download_dir, status_msg)
-            elif is_ytdlp_supported(url):
-                files = await download_ytdlp(url, download_dir, lambda d, t: None)
-            else:
-                filename = get_filename_from_url(url)
-                file_path = download_dir / filename
-                await download_direct(url, file_path, lambda d, t: None)
-                files = [file_path]
+        while True:
+            download = aria2_api.get_download(gid)
             
-            if not files:
-                raise Exception("No files downloaded")
+            if download.is_complete:
+                file_path = Path(download.files[0].path)
+                await event.edit("✅ Download complete! Starting upload...")
+                await upload_file(event, file_path)
+                break
             
-            await status_msg.edit("✅ Download complete, processing...")
+            if download.error_message:
+                await event.edit(f"❌ Aria2 error: {download.error_message}")
+                break
             
-            if do_zip:
-                await status_msg.edit("📦 Creating zip...")
-                zip_path = download_dir / f"{download_dir.name}.zip"
-                await create_zip(files, zip_path)
-                upload_files = [zip_path]
-            elif do_unzip:
-                await status_msg.edit("📂 Extracting...")
-                upload_files = []
+            # Progress update
+            if download.total_length > 0:
+                percentage = int(download.completed_length / download.total_length * 100)
+                speed = download.download_speed_string()
+                size = download.total_length_string()
+                
+                await event.edit(
+                    f"⬇️ **Aria2 Downloading**...\n"
+                    f"`{download.name}`\n"
+                    f"{get_progress_bar(percentage)} {percentage}%\n"
+                    f"Speed: {speed} | Size: {size}"
+                )
+            
+            await asyncio.sleep(3)
+            
+    except Exception as e:
+        await event.edit(f"❌ Progress check failed: {str(e)}")
+
+# --- QBITTORRENT HANDLERS ---
+async def check_qb_progress(torrent_hash, event):
+    """Monitor qBittorrent download progress"""
+    try:
+        while True:
+            torrent = qb.torrents.info(torrent_hashes=torrent_hash)[0]
+            
+            if torrent.state_enum.is_complete:
+                # Get files
+                files = qb.torrents_files(torrent_hash=torrent_hash)
+                save_path = torrent.save_path
+                
+                await event.edit("✅ qBittorrent download complete! Starting upload...")
+                
+                # Upload all files
                 for file in files:
-                    if get_file_info(file)['is_archive']:
-                        extracted = await extract_archive(file, download_dir / "extracted")
-                        upload_files.extend(extracted)
-                        file.unlink()
-                    else:
-                        upload_files.append(file)
-            else:
-                upload_files = files
+                    file_path = Path(save_path) / file.name
+                    if file_path.exists():
+                        await upload_file(event, file_path)
+                
+                # Remove torrent
+                qb.torrents.delete(delete_files=True, torrent_hashes=torrent_hash)
+                break
             
-            await status_msg.edit(f"📤 Uploading {len(upload_files)} file(s)...")
-            upload_tasks = [upload_file(message, file, as_video) for file in upload_files]
-            await asyncio.gather(*upload_tasks)
+            if torrent.state_enum.errored:
+                await event.edit(f"❌ qBittorrent error: {torrent.state}")
+                qb.torrents.delete(delete_files=True, torrent_hashes=torrent_hash)
+                break
             
-            await status_msg.edit("✅ **Leech completed!**")
+            # Progress update
+            if torrent.total_size > 0:
+                percentage = int(torrent.downloaded / torrent.total_size * 100)
+                speed = torrent.dlspeed
+                size = torrent.total_size
+                
+                # Convert speed to human readable
+                if speed > 1024*1024:
+                    speed_str = f"{speed/(1024*1024):.2f} MB/s"
+                elif speed > 1024:
+                    speed_str = f"{speed/1024:.2f} KB/s"
+                else:
+                    speed_str = f"{speed} B/s"
+                
+                # Convert size
+                if size > 1024*1024*1024:
+                    size_str = f"{size/(1024**3):.2f} GB"
+                elif size > 1024*1024:
+                    size_str = f"{size/(1024**2):.2f} MB"
+                else:
+                    size_str = f"{size/1024:.2f} KB"
+                
+                await event.edit(
+                    f"⬇️ **qBittorrent Downloading**...\n"
+                    f"`{torrent.name}`\n"
+                    f"{get_progress_bar(percentage)} {percentage}%\n"
+                    f"Speed: {speed_str} | Size: {size_str}\n"
+                    f"Seeds: {torrent.num_leechs} | Leechers: {torrent.num_leechs}"
+                )
+            
+            await asyncio.sleep(5)
+            
     except Exception as e:
-        logger.error(f"Leech error: {e}")
-        await message.reply(f"❌ **Error:** `{e}`")
-    finally:
-        if download_dir.exists():
-            shutil.rmtree(download_dir)
+        await event.edit(f"❌ qBittorrent progress check failed: {str(e)}")
+        qb.torrents.delete(delete_files=True, torrent_hashes=torrent_hash)
 
-# ========== COMMAND HANDLERS ==========
-@bot.on_message(filters.command(["start", "help"]) & filters.private)
-async def start_handler(client: Client, message: Message):
-    """Handle /start and /help commands"""
-    if not is_allowed(message.from_user.id):
-        return await message.reply("❌ **Unauthorized**")
-    
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Leech File", callback_data="help_leech")],
-        [InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="settings")]
-    ])
-    
-    await message.reply(
-        "🤖 **Leech Bot Ready!**\n\n"
-        "**Commands:**\n"
-        "`/leech <URL>` - Document\n"
-        "`/leech <URL> -v` - Video\n"
-        "`/leech <URL> -z` - ZIP\n"
-        "`/leech <URL> -e` - Extract\n"
-        "`/status` - Show status\n"
-        "`/cancel` - Cancel downloads\n\n"
-        "**Supported:** Direct links, YouTube, TikTok, Instagram, Magnet/Torrent",
-        reply_markup=buttons
-    )
-
-@bot.on_message(filters.command("leech") & filters.private)
-async def leech_handler(client: Client, message: Message):
-    """Handle /leech command"""
-    if not is_allowed(message.from_user.id):
-        return await message.reply("❌ **Unauthorized**")
-    
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.reply(
-            "📥 **Leech Usage**\n\n"
-            "`/leech <URL>` - Document\n"
-            "`/leech <URL> -v` - Video\n"
-            "`/leech <URL> -z` - ZIP\n"
-            "`/leech <URL> -e` - Extract\n"
-            "`/leech <URL> -v -z` - Combine\n\n"
-            "**Supported:** Direct links, YouTube, TikTok, Instagram, Magnet/Torrent\n\n"
-            "**Example:** `/leech https://example.com/file.zip -e -v`"
-        )
-    
-    cmd_text = args[1]
-    flags = []
-    for flag in ['-v', '-z', '-e']:
-        if flag in cmd_text:
-            flags.append(flag.replace('-', ''))
-            cmd_text = cmd_text.replace(flag, '')
-    
-    url = cmd_text.strip()
-    if not url:
-        return await message.reply("❌ No URL provided")
-    
-    asyncio.create_task(process_leech(message, url, flags))
-
-@bot.on_message(filters.command("status") & filters.private)
-async def status_handler(client: Client, message: Message):
-    """Handle /status command"""
-    if not is_allowed(message.from_user.id):
+# --- BOT COMMANDS ---
+@bot.on(events.NewMessage(pattern='/start'))
+async def start_command(event):
+    if not is_admin(event.sender_id):
         return
     
-    cpu = psutil.cpu_percent(interval=1)
-    memory = psutil.virtual_memory()
-    disk = psutil.disk_usage('/')
-    
-    active_list = []
-    for dl_id, dl_info in active_downloads.items():
-        elapsed = time.time() - dl_info['start_time']
-        active_list.append(f"• {dl_info['url'][:40]}... ({int(elapsed)}s)")
-    
-    text = (
-        "🤖 **Bot Status**\n\n"
-        f"**CPU:** {cpu}%\n"
-        f"**RAM:** {memory.percent}% ({human_bytes(memory.used)}/{human_bytes(memory.total)})\n"
-        f"**Disk:** {disk.percent}% ({human_bytes(disk.used)}/{human_bytes(disk.total)})\n"
-        f"**Active Downloads:** {len(active_downloads)}\n\n"
+    await event.reply(
+        "🤖 **Leech Bot is Ready!**\n\n"
+        "Commands:\n"
+        "/aria <magnet/torrent> - Download with aria2c\n"
+        "/qb <magnet/torrent> - Download with qBittorrent\n"
+        "/cancel <gid> - Cancel aria2 download\n"
+        "/status - Show active downloads\n"
+        "/stats - Show system stats"
     )
-    
-    if active_list:
-        text += "**Active Tasks:**\n" + "\n".join(active_list[:3])
-    
-    await message.reply(text)
 
-@bot.on_message(filters.command("cancel") & filters.private)
-async def cancel_handler(client: Client, message: Message):
-    """Handle /cancel command"""
-    if not is_allowed(message.from_user.id):
+@bot.on(events.NewMessage(pattern='/aria'))
+async def aria_command(event):
+    if not is_admin(event.sender_id):
         return
     
-    count = len(active_downloads)
-    active_downloads.clear()
-    await message.reply(f"⏹️ **Cancelled {count} active download(s)**")
-
-@bot.on_callback_query()
-async def callback_handler(client: Client, callback_query):
-    """Handle button callbacks"""
-    data = callback_query.data
+    # Get URL/magnet
+    message_text = event.raw_text
+    if len(message_text.split()) < 2:
+        await event.reply("❌ Provide a magnet link or URL!")
+        return
     
-    if data == "help_leech":
-        await callback_query.message.edit_text(
-            "📥 **Leech Usage**\n\n"
-            "`/leech <URL>` - Document\n"
-            "`/leech <URL> -v` - Video\n"
-            "`/leech <URL> -z` - ZIP\n"
-            "`/leech <URL> -e` - Extract\n"
-            "`/leech <URL> -v -z` - Combine"
-        )
-    elif data == "status":
-        await status_handler(client, callback_query.message)
-    elif data == "settings":
-        await callback_query.message.edit_text(
-            "⚙️ **Settings**\n\n"
-            f"Max Downloads: {CONFIG['MAX_CONCURRENT_DOWNLOADS']}\n"
-            f"Max Uploads: {CONFIG['MAX_CONCURRENT_UPLOADS']}\n"
-            f"Allowed Users: {'All' if CONFIG['ALLOWED_USERS'] is None else CONFIG['ALLOWED_USERS']}"
-        )
-
-# ========== BACKGROUND TASKS ==========
-@scheduler.scheduled_job('interval', minutes=5)
-async def keep_alive():
-    logger.info(f"Pulse | CPU: {psutil.cpu_percent()}% | Memory: {psutil.virtual_memory().percent}% | Active: {len(active_downloads)}")
-
-# ========== MAIN ==========
-async def run_services():
-    """Start all services in correct order"""
-    port = int(os.getenv("PORT", "10000"))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
+    link = message_text.split(maxsplit=1)[1]
     
-    server_task = asyncio.create_task(server.serve())
-    logger.info(f"🌐 Web server starting on port {port}...")
-    await asyncio.sleep(3)
+    status_msg = await event.reply("🔄 Processing with aria2c...")
     
     try:
-        scheduler.start()
-        logger.info("✅ Scheduler started")
+        # Add download
+        download = aria2_api.add_magnet(link) if link.startswith('magnet:') else aria2_api.add_urlp(link)
+        
+        # Store active download
+        active_downloads[download.gid] = {
+            'type': 'aria2',
+            'event': status_msg
+        }
+        
+        # Start monitoring
+        asyncio.create_task(check_aria_progress(download.gid, status_msg))
+        
     except Exception as e:
-        logger.error(f"❌ Scheduler failed: {e}")
+        await status_msg.edit(f"❌ Failed to add download: {str(e)}")
+
+@bot.on(events.NewMessage(pattern='/qb'))
+async def qb_command(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    # Get URL/magnet
+    message_text = event.raw_text
+    if len(message_text.split()) < 2:
+        await event.reply("❌ Provide a magnet link or torrent file!")
+        return
+    
+    link = message_text.split(maxsplit=1)[1]
+    
+    status_msg = await event.reply("🔄 Processing with qBittorrent...")
     
     try:
-        await bot.start()
-        me = await bot.get_me()
-        logger.info(f"🤖 Bot is running as @{me.username} (ID: {me.id})")
+        # Add torrent
+        if link.startswith('magnet:'):
+            torrent = qb.torrents.add(urls=link, save_path=str(DOWNLOAD_PATH))
+        else:
+            # For .torrent files, you'd need to download first
+            await status_msg.edit("❌ Direct .torrent file links not supported yet. Use magnets.")
+            return
+        
+        # Get torrent hash
+        await asyncio.sleep(2)  # Wait for torrent to appear
+        torrents = qb.torrents.info(sort_by='added_on', reverse=True)
+        if torrents:
+            torrent_hash = torrents[0].hash
+            
+            # Store active download
+            active_downloads[torrent_hash] = {
+                'type': 'qb',
+                'event': status_msg
+            }
+            
+            # Start monitoring
+            asyncio.create_task(check_qb_progress(torrent_hash, status_msg))
+        else:
+            await status_msg.edit("❌ Failed to add torrent to qBittorrent")
+        
     except Exception as e:
-        logger.error(f"❌ Bot failed to start: {e}")
+        await status_msg.edit(f"❌ qBittorrent error: {str(e)}")
+
+@bot.on(events.NewMessage(pattern='/cancel'))
+async def cancel_command(event):
+    if not is_admin(event.sender_id):
+        return
     
-    try:
-        await asyncio.Event().wait()
-    finally:
-        server_task.cancel()
+    message_text = event.raw_text
+    if len(message_text.split()) < 2:
+        await event.reply("❌ Provide a GID or torrent hash!")
+        return
+    
+    gid = message_text.split(maxsplit=1)[1]
+    
+    if gid in active_downloads:
+        dl_info = active_downloads[gid]
+        if dl_info['type'] == 'aria2':
+            aria2_api.remove(gid, force=True)
+        elif dl_info['type'] == 'qb':
+            qb.torrents.delete(delete_files=True, torrent_hashes=gid)
+        
+        del active_downloads[gid]
+        await event.reply(f"✅ Cancelled: {gid}")
+    else:
+        await event.reply("❌ Download not found!")
+
+@bot.on(events.NewMessage(pattern='/status'))
+async def status_command(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    if not active_downloads:
+        await event.reply("📊 **No active downloads**")
+        return
+    
+    status_text = "📊 **Active Downloads:**\n\n"
+    for gid, info in active_downloads.items():
+        status_text += f"**{gid}** ({info['type']})\n"
+    
+    await event.reply(status_text)
+
+@bot.on(events.NewMessage(pattern='/stats'))
+async def stats_command(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    # Aria2 stats
+    aria2_info = aria2_api.get_global_stats()
+    aria_stats = (
+        f"📈 **Aria2 Stats:**\n"
+        f"Active: {aria2_info.num_active}\n"
+        f"Waiting: {aria2_info.num_waiting}\n"
+        f"Download Speed: {aria2_info.download_speed_string()}\n\n"
+    )
+    
+    # qBittorrent stats
+    qb_stats = qb.transfer_info()
+    qb_info = (
+        f"📈 **qBittorrent Stats:**\n"
+        f"Active Torrents: {len(qb.torrents.info())}\n"
+        f"Download Speed: {qb_stats['dl_info_speed'] / 1024:.2f} KB/s\n"
+        f"Upload Speed: {qb_stats['up_info_speed'] / 1024:.2f} KB/s\n"
+    )
+    
+    await event.reply(aria_stats + qb_info)
+
+# --- FILE HANDLER ---
+@bot.on(events.NewMessage(incoming=True))
+async def file_handler(event):
+    if not is_admin(event.sender_id):
+        return
+    
+    # Handle .torrent files
+    if event.document and event.document.mime_type == "application/x-bittorrent":
+        status_msg = await event.reply("📥 Downloading .torrent file...")
+        
+        # Download file
+        torrent_path = DOWNLOAD_PATH / f"{event.document.id}.torrent"
+        await event.download_media(file=torrent_path)
+        
+        await status_msg.edit("🔄 Adding to qBittorrent...")
+        
         try:
-            scheduler.shutdown()
-            await bot.stop()
-        except:
-            pass
-        logger.info("🛑 Shutdown complete.")
+            # Add to qBittorrent
+            qb.torrents.add(torrent_files=str(torrent_path), save_path=str(DOWNLOAD_PATH))
+            torrent_path.unlink()  # Remove torrent file
+            
+            # Get hash and monitor
+            await asyncio.sleep(2)
+            torrents = qb.torrents.info(sort_by='added_on', reverse=True)
+            if torrents:
+                torrent_hash = torrents[0].hash
+                active_downloads[torrent_hash] = {
+                    'type': 'qb',
+                    'event': status_msg
+                }
+                asyncio.create_task(check_qb_progress(torrent_hash, status_msg))
+            else:
+                await status_msg.edit("❌ Failed to add torrent")
+                
+        except Exception as e:
+            await status_msg.edit(f"❌ Error: {str(e)}")
+            if torrent_path.exists():
+                torrent_path.unlink()
 
-def main():
-    uvloop.install()
-    CONFIG['DOWNLOAD_DIR'].mkdir(parents=True, exist_ok=True)
+# --- STARTUP ---
+async def startup():
+    """Initialize clients and create directories"""
+    print("🚀 Starting Leech Bot...")
     
-    if not CONFIG['BOT_TOKEN'] or CONFIG['BOT_TOKEN'] == "YOUR_BOT_TOKEN":
-        logger.error("❌ BOT_TOKEN not set!")
-        exit(1)
+    # Create download directory
+    DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True)
     
-    logger.info("🚀 Starting Leech Bot services...")
-    asyncio.run(run_services())
+    # Test aria2 connection
+    try:
+        aria2_api.get_version()
+        print("✅ Aria2c connected")
+    except Exception as e:
+        print(f"⚠️ Aria2c connection failed: {e}. Start aria2c with: aria2c --enable-rpc --rpc-listen-all --rpc-secret=your_secret")
+    
+    # Test qBittorrent connection
+    try:
+        qb.app_version()
+        print("✅ qBittorrent connected")
+        # Configure qBittorrent
+        qb.application.set_preferences({
+            "max_active_downloads": MAX_PARALLEL,
+            "max_active_torrents": MAX_PARALLEL,
+            "max_active_uploads": 3
+        })
+    except Exception as e:
+        print(f"⚠️ qBittorrent connection failed: {e}. Ensure qBittorrent is running with Web UI enabled")
+    
+    print(f"✅ Bot is ready! Admin IDs: {ADMIN_IDS}")
 
-if __name__ == "__main__":
-    main()
+# Run startup
+loop = asyncio.get_event_loop()
+loop.run_until_complete(startup())
+
+# Start bot
+print("📡 Bot is running...")
+bot.run_until_disconnected()
