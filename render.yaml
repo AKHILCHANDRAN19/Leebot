@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: leech-bot-pro
     env: python
     buildCommand: |
