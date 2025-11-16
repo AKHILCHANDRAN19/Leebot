@@ -1,0 +1,6 @@
+# requirements.txt
+Pyrogram
+TgCrypto
+uvloop
+python-dotenv
+psutil
