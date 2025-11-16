@@ -1,6 +1,21 @@
-# requirements.txt
-Pyrogram
-TgCrypto
-uvloop
-python-dotenv
-psutil
+# Core Dependencies
+pyrogram==2.0.106
+tgcrypto==1.2.5
+python-dotenv==1.0.0
+
+# Download Managers
+yt-dlp==2024.11.18
+aiohttp==3.9.1
+aria2p==0.11.3
+
+# System & Utilities
+psutil==5.9.6
+Pillow==10.1.0
+natsort==8.4.0
+pymegatools==1.0.0
+
+# Optional: For video processing
+moviepy==1.0.3
+
+# Async Support
+uvloop==0.19.0
