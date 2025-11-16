@@ -1,6 +1,6 @@
-telethon==1.34.0
-aiohttp==3.9.3
+telethon==1.36.0
+aiohttp==3.9.5
 aiofiles==23.2.1
 aria2p==0.11.3
-qbittorrent-api==2024.2.60
+qbittorrent-api==2024.3.60  # ⭐ FIXED VERSION
 python-magic==0.4.27
