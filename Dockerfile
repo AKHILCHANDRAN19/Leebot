@@ -4,21 +4,17 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y \
     aria2 \
     unzip \
+    unrar \
     p7zip-full \
     ffmpeg \
     libtorrent-rasterbar-dev \
     python3-dev \
     build-essential \
-    wget \
     curl \
+    wget \
+    jq \
+    git \
     && rm -rf /var/lib/apt/lists/*
-
-# Install unrar from a known working version
-RUN wget --no-check-certificate https://www.rarlab.com/rar/unrarsrc-6.2.10.tar.gz && \
-    tar -xzvf unrarsrc-6.2.10.tar.gz && \
-    cd unrar && \
-    make && \
-    install -m 755 unrar /usr/bin
 
 # Set working directory
 WORKDIR /app
@@ -32,6 +28,9 @@ COPY bot.py .
 
 # Create necessary directories
 RUN mkdir -p downloads extracted upload
+
+# Set permissions
+RUN chmod +x bot.py
 
 # Run the bot
 CMD ["python", "bot.py"]
