@@ -4,7 +4,6 @@ FROM python:3.10-slim
 RUN apt-get update && apt-get install -y \
     aria2 \
     unzip \
-    unrar \
     p7zip-full \
     ffmpeg \
     libtorrent-rasterbar-dev \
@@ -15,6 +14,13 @@ RUN apt-get update && apt-get install -y \
     jq \
     git \
     && rm -rf /var/lib/apt/lists/*
+
+# Install unrar by compiling it from source
+RUN wget --no-check-certificate https://www.rarlab.com/rar/unrarsrc-6.2.10.tar.gz && \
+    tar -xzvf unrarsrc-6.2.10.tar.gz && \
+    cd unrar && \
+    make && \
+    install -m 755 unrar /usr/bin
 
 # Set working directory
 WORKDIR /app
