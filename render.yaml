@@ -3,17 +3,17 @@ services:
     name: leech-bot-pro
     env: python
     buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
       apt-get update && apt-get install -y aria2 ffmpeg
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: API_ID
-        sync: false
+        value: 2819362
       - key: API_HASH
-        sync: false
+        value: 578ce3d09fadd539544a327c45b55ee4
       - key: BOT_TOKEN
-        sync: false
+        value: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
       - key: OWNER_ID
         sync: false
       - key: DUMP_CHANNEL_ID
@@ -23,5 +23,5 @@ services:
     disk:
       name: downloads
       mountPath: /app/downloads
-      sizeGB: 50  # Adjust based on your Render plan
-    plan: starter  # Use 'starter' for better performance
+      sizeGB: 50
+    plan: starter
