@@ -47,6 +47,7 @@ LEECH_LOG_GROUP = None  # Replace with your log group ID if you want to log down
 # User data
 users = {}
 downloads = {}
+uploads = {}
 
 # Initialize Pyrogram client
 app = Client(
@@ -482,7 +483,7 @@ async def upload_progress(current, total, message, file_name, file_size):
         logger.error(f"Error in upload progress: {e}")
 
 # Bot command handlers
-@app.on_message(filters.command("start"))
+@app.on_message(filters.command(["start"]))
 async def start_command(client, message):
     """Handle /start command"""
     await message.reply(
@@ -503,7 +504,7 @@ async def start_command(client, message):
         "/cleartemp - Clear temporary files"
     )
 
-@app.on_message(filters.command("help"))
+@app.on_message(filters.command(["help"]))
 async def help_command(client, message):
     """Handle /help command"""
     await message.reply(
@@ -522,7 +523,7 @@ async def help_command(client, message):
         "• You can send multiple links to create a queue"
     )
 
-@app.on_message(filters.command("leech"))
+@app.on_message(filters.command(["leech"]))
 async def leech_command(client, message):
     """Handle /leech command"""
     if len(message.command) < 2:
@@ -532,7 +533,7 @@ async def leech_command(client, message):
     url = message.command[1]
     await process_link(client, message, url)
 
-@app.on_message(filters.command("cancel"))
+@app.on_message(filters.command(["cancel"]))
 async def cancel_command(client, message):
     """Handle /cancel command"""
     user_id = message.from_user.id
@@ -542,7 +543,7 @@ async def cancel_command(client, message):
     else:
         await message.reply("❌ No active download to cancel.")
 
-@app.on_message(filters.command("status"))
+@app.on_message(filters.command(["status"]))
 async def status_command(client, message):
     """Handle /status command"""
     user_id = message.from_user.id
@@ -553,7 +554,7 @@ async def status_command(client, message):
     else:
         await message.reply("❌ No active download.")
 
-@app.on_message(filters.command("cleartemp"))
+@app.on_message(filters.command(["cleartemp"]))
 async def clear_temp_command(client, message):
     """Handle /cleartemp command"""
     try:
@@ -602,7 +603,7 @@ async def handle_torrent_file(client, message):
     except Exception as e:
         await message.reply(f"❌ Error processing torrent file: {str(e)}")
 
-@app.on_message(filters.text & ~filters.command())
+@app.on_message(filters.text & ~filters.command(["start", "help", "leech", "cancel", "status", "cleartemp"]))
 async def handle_text_message(client, message):
     """Handle text messages (URLs and magnet links)"""
     text = message.text.strip()
@@ -722,10 +723,6 @@ async def process_link(client, message, link):
         # Clean up download tracking
         if user_id in downloads:
             del downloads[user_id]
-
-# Global variables for tracking
-downloads = {}
-uploads = {}
 
 # Start the bot
 if __name__ == "__main__":
