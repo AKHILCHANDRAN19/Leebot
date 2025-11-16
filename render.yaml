@@ -5,6 +5,15 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
     disk:
       name: downloads
       mountPath: /app/downloads
