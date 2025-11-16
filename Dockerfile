@@ -10,12 +10,12 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     build-essential \
     wget \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install unrar by compiling it from the official source.
-# This is the most reliable method and bypasses repository issues.
-RUN wget --no-check-certificate https://www.rarlab.com/rar/unrar-6.2.12.tar.gz && \
-    tar -xzvf unrar-6.2.12.tar.gz && \
+# Install unrar from a known working version
+RUN wget --no-check-certificate https://www.rarlab.com/rar/unrarsrc-6.2.10.tar.gz && \
+    tar -xzvf unrarsrc-6.2.10.tar.gz && \
     cd unrar && \
     make && \
     install -m 755 unrar /usr/bin
