@@ -1,0 +1,17 @@
+# render.yaml
+services:
+  - type: worker
+    name: telegram-leech-bot
+    env: python
+    buildCommand: "apt-get update && apt-get install -y aria2 && pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: BOT_TOKEN
+        # NOTE: Set the value in the Render Dashboard under Environment
+        sync: false
+      - key: API_ID
+        # NOTE: Set the value in the Render Dashboard under Environment
+        sync: false
+      - key: API_HASH
+        # NOTE: Set the value in the Render Dashboard under Environment
+        sync: false
