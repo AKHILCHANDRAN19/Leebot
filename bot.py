@@ -28,11 +28,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DUMP_CHANNEL_ID = int(os.getenv("DUMP_CHANNEL_ID", "0"))
 
-# Constants
-WORK_DIR = Path("/app/downloads")
-WORK_DIR.mkdir(exist_ok=True)
+# FIXED: Use relative path instead of /app
+WORK_DIR = Path("bot_data")  # Creates in current working directory (/opt/render/project/src)
+WORK_DIR.mkdir(exist_ok=True, parents=True)  # parents=True creates parent dirs if needed
 DOWNLOAD_DIR = WORK_DIR / "downloads"
-DOWNLOAD_DIR.mkdir(exist_ok=True)
+DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 
 # Logging
@@ -58,7 +58,7 @@ def is_url_valid(url: str) -> bool:
     return bool(re.match(r'^(https?|ftp|magnet):\/\/', url))
 
 def is_torrent(url: str) -> bool:
-    return url.startswith('magnet:?') or url.endswith('.torrent')
+    return url.startswith('magnet:?xt=urn:btih:')
 
 def is_ytdl_supported(url: str) -> bool:
     return any(x in url for x in ['youtube.com', 'youtu.be', 'instagram.com', 'facebook.com', 'twitter.com', 'x.com'])
@@ -178,7 +178,6 @@ class YTDLManager:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 return Path(ydl.prepare_filename(info))
-                
         except Exception as e:
             logger.error(f"YTDL error: {e}")
             return None
@@ -228,7 +227,7 @@ class UploadManager:
     async def _split_upload(self, file_path: Path, chat_id: int, task_id: str):
         """Split file into parts and upload"""
         split_dir = DOWNLOAD_DIR / "splits"
-        split_dir.mkdir(exist_ok=True)
+        split_dir.mkdir(exist_ok=True, parents=True)
         
         # Use Unix split command
         cmd = f"split -b {MAX_FILE_SIZE} '{file_path}' '{split_dir}/{file_path.name}.part'"
