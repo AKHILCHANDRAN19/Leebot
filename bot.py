@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Single-File LeechBot Pro for Render Web Service (Python 3.13+)
+# Web Service LeechBot - Bot runs in background, web server is main process
 import os, re, asyncio, subprocess, logging, sys
 from pathlib import Path
 from datetime import datetime
@@ -34,14 +34,13 @@ logger = logging.getLogger(__name__)
 # === PYROGRAM CLIENT ===
 bot = Client("leech_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=str(WORK_DIR))
 
-# === STATE MANAGEMENT ===
+# === STATE ===
 class DownloadTask:
     def __init__(self, task_id: str, url: str, status_msg: Optional[Message] = None):
         self.task_id = task_id
         self.url = url
         self.status_msg = status_msg
         self.start_time = datetime.now()
-        self.file_path: Optional[Path] = None
 
 tasks: Dict[str, DownloadTask] = {}
 
@@ -75,11 +74,12 @@ seed-ratio=0
 seed-time=0
 enable-dht=true
 allow-overwrite=true
+quiet=true
 """
         self.config_path.write_text(config)
     
     async def download(self, url: str, task_id: str) -> Optional[Path]:
-        cmd = ["aria2c", f"--conf-path={self.config_path}", "--quiet", url]
+        cmd = ["aria2c", f"--conf-path={self.config_path}", url]
         process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         await process.wait()
         
@@ -106,7 +106,7 @@ class UploadManager:
                 await self._split_upload(file_path, chat_id, task_id)
                 return
             
-            status_msg = await bot.send_message(chat_id, "📤 Uploading...")
+            status_msg = await bot.send_message(chat_id, "📤 Starting upload...")
             
             async def progress(current: int, total: int):
                 try:
@@ -127,7 +127,7 @@ class UploadManager:
             await self.upload(file_path, chat_id, task_id)
         except Exception as e:
             logger.error(f"Upload error: {e}")
-    
+
     async def _split_upload(self, file_path: Path, chat_id: int, task_id: str):
         split_dir = DOWNLOAD_DIR / "splits"
         split_dir.mkdir(exist_ok=True, parents=True)
@@ -140,9 +140,12 @@ class UploadManager:
 # === FASTAPI WEB SERVER ===
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Start bot when web server starts"""
+    logger.info("Starting bot...")
     await bot.start()
-    logger.info("Bot started in background")
+    logger.info("Bot started successfully")
     yield
+    logger.info("Stopping bot...")
     await bot.stop()
     logger.info("Bot stopped")
 
@@ -156,17 +159,7 @@ async def root():
 async def health():
     return "OK"
 
-@web_app.post("/leech")
-async def leech_api(url: str, user_id: int = None):
-    if not is_url_valid(url):
-        raise HTTPException(status_code=400, detail="Invalid URL")
-    task_id = f"api_{asyncio.get_event_loop().time()}"
-    task = DownloadTask(task_id, url)
-    tasks[task_id] = task
-    asyncio.create_task(process_download(task))
-    return JSONResponse({"status": "started", "task_id": task_id})
-
-# === BOT COMMAND HANDLERS ===
+# === BOT HANDLERS ===
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message: Message):
     await message.reply_text(
@@ -183,20 +176,23 @@ async def leech_command(client, message: Message):
         return
     
     url = message.command[1]
-    task_id = f"{message.from_user.id}_{asyncio.get_event_loop().time()}"
+    if not is_url_valid(url):
+        await message.reply_text("Invalid URL!")
+        return
+    
+    task_id = f"{message.from_user.id}_{int(asyncio.get_event_loop().time())}"
     status_msg = await message.reply_text("🚀 Starting download...")
     
     task = DownloadTask(task_id, url, status_msg)
     tasks[task_id] = task
     asyncio.create_task(process_download(task))
 
-# === MAIN PROCESSOR ===
 async def process_download(task: DownloadTask):
     try:
         downloader = AriaManager() if is_torrent(task.url) else YTDLManager()
         file_path = await downloader.download(task.url, task.task_id)
         
-        if not file_path or not file_path.exists():
+        if not file_path:
             await task.status_msg.edit_text("❌ Download failed!")
             return
         
@@ -205,6 +201,7 @@ async def process_download(task: DownloadTask):
         uploader = UploadManager()
         await uploader.upload(file_path, DUMP_CHANNEL_ID, task.task_id)
         
+        # Cleanup
         if file_path.is_file():
             file_path.unlink()
         else:
@@ -220,9 +217,6 @@ async def process_download(task: DownloadTask):
 
 # === ENTRY POINT ===
 if __name__ == "__main__":
-    # Render provides PORT env var
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting LeechBot Pro on port {port}")
-    
-    # Run FastAPI + bot together
+    logger.info(f"Starting web server on port {port}...")
     uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="info")
