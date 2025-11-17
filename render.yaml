@@ -3,10 +3,14 @@ services:
     name: leech-bot-pro
     env: python
     buildCommand: |
-      apt-get update && apt-get install -y aria2 ffmpeg
+      # ✅ Force aria2 installation
+      apt-get update -qq
+      apt-get install -y aria2 ffmpeg
+      # Verify installation
+      which aria2c && aria2c --version
       pip install --upgrade pip setuptools wheel
       pip install -r requirements.txt
-    startCommand: python bot.py  # ✅ MUST match your filename
+    startCommand: python bot.py
     envVars:
       - key: API_ID
         value: 2819362
@@ -15,9 +19,9 @@ services:
       - key: BOT_TOKEN
         value: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
       - key: OWNER_ID
-        sync: 6219290068
+        value: 6219290068
       - key: DUMP_CHANNEL_ID
-        sync: -1003286196892
+        value: -1003286196892
       - key: PORT
         value: 10000
     plan: starter
