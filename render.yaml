@@ -15,9 +15,9 @@ services:
       - key: BOT_TOKEN
         value: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
       - key: OWNER_ID
-        sync: false
+        sync: 6219290068
       - key: DUMP_CHANNEL_ID
-        sync: false
+        sync: -1003286196892
       - key: PORT
         value: 10000
     plan: starter
