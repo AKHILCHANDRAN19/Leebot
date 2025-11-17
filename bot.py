@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Web Service LeechBot - Production Edition
+# Web Service LeechBot - Production Edition (FIXED)
 import os, re, asyncio, subprocess, logging, threading, sys, time
 from pathlib import Path
 from datetime import datetime
@@ -27,13 +27,13 @@ DOWNLOAD_DIR = WORK_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True, parents=True)
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
 
-# ✅ Persistent logging to file
+# ✅ Persistent logging
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", mode='a')  # Debug logs persist
+        logging.FileHandler("bot.log", mode='a')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -48,8 +48,8 @@ class DownloadTask:
         self.url = url
         self.status_msg = status_msg
         self.start_time = datetime.now()
-        self.download_start = None  # ✅ Track download start time
-        self.error_msg = None  # ✅ Persistent error display
+        self.download_start = None
+        self.error_msg = None
 
 tasks: Dict[str, DownloadTask] = {}
 
@@ -71,7 +71,6 @@ def create_progress_bar(percentage: float, width: int = 10) -> str:
     filled = int(percentage / 100 * width)
     return "▪" * filled + "▫" * (width - filled)
 
-# ✅ FIXED: Use CORRECT start_time parameter
 async def detailed_progress(current: int, total: int, start_time: datetime, action: str) -> str:
     elapsed = (datetime.now() - start_time).total_seconds()
     speed = current / elapsed if elapsed > 0 else 0
@@ -88,55 +87,8 @@ async def detailed_progress(current: int, total: int, start_time: datetime, acti
         f"[{bar}]\n"
         f"{human_size(current)} of {human_size(total)}\n"
         f"Speed: {human_size(speed)}/sec\n"
-        f"ETA: {eta_str}\n\n"
-        "Thanks for using this bot"
+        f"ETA: {eta_str}"
     )
-
-# ✅ FIXED: Multi-method aria2 installation
-def ensure_aria2_installed():
-    """Try multiple methods to install aria2"""
-    try:
-        # Method 1: Check if already installed
-        result = subprocess.run(['which', 'aria2c'], capture_output=True, text=True)
-        if result.returncode == 0:
-            path = result.stdout.strip()
-            # Test it works
-            test = subprocess.run([path, '--version'], capture_output=True, text=True)
-            if test.returncode == 0:
-                logger.info(f"✅ aria2c working: {test.stdout.split()[0]}")
-                return True
-        
-        logger.warning("aria2c not found, installing...")
-        
-        # Method 2: apt-get (most reliable)
-        install_cmd = "apt-get update -qq && apt-get install -y aria2"
-        install = subprocess.run(install_cmd, shell=True, capture_output=True, text=True, timeout=120)
-        
-        if install.returncode == 0:
-            # Verify
-            verify = subprocess.run(['which', 'aria2c'], capture_output=True, text=True)
-            if verify.returncode == 0:
-                logger.info(f"✅ aria2c installed: {verify.stdout.strip()}")
-                return True
-        
-        logger.error(f"❌ apt-get failed: {install.stderr}")
-        
-        # Method 3: apt (fallback)
-        alt_cmd = "apt update -qq && apt install -y aria2"
-        alt = subprocess.run(alt_cmd, shell=True, capture_output=True, text=True, timeout=120)
-        
-        if alt.returncode == 0:
-            verify = subprocess.run(['which', 'aria2c'], capture_output=True, text=True)
-            if verify.returncode == 0:
-                logger.info(f"✅ aria2c installed via apt: {verify.stdout.strip()}")
-                return True
-        
-        logger.error(f"❌ All methods failed. apt stderr: {alt.stderr}")
-        return False
-        
-    except Exception as e:
-        logger.error(f"❌ Installation error: {e}")
-        return False
 
 # === DOWNLOAD MANAGERS ===
 class AriaManager:
@@ -144,21 +96,23 @@ class AriaManager:
         self.config_path = WORK_DIR / "aria2.conf"
         self._setup_config()
         
-        # ✅ Verify on startup
-        if not ensure_aria2_installed():
-            raise RuntimeError(
-                "❌ aria2c installation failed!\n\n"
-                "Manual fix: SSH into Render and run:\n"
-                "sudo apt-get update && sudo apt-get install -y aria2\n"
-                "Then redeploy."
-            )
+        # ✅ Simple check - will fail fast if aria2 not installed
+        try:
+            subprocess.run(['aria2c', '--version'], capture_output=True, check=True, timeout=5)
+            logger.info("✅ aria2c is installed and working")
+        except:
+            logger.error("❌ aria2c is NOT installed!")
+            logger.error("Manual fix: Connect to your Render service via SSH and run:")
+            logger.error("$ sudo apt-get update && sudo apt-get install -y aria2")
+            logger.error("Then redeploy the service.")
+            raise RuntimeError("aria2c not available")
     
     def _setup_config(self):
         config = f"""dir={DOWNLOAD_DIR}
-max-concurrent-downloads=10
-max-connection-per-server=16
-split=16
-bt-max-peers=100
+max-concurrent-downloads=3
+max-connection-per-server=8
+split=8
+bt-max-peers=50
 seed-ratio=0
 seed-time=0
 enable-dht=true
@@ -168,70 +122,52 @@ log-level=error
         self.config_path.write_text(config)
     
     async def download(self, url: str, task_id: str, task: DownloadTask) -> Optional[Path]:
-        """Download with real-time progress"""
+        """Download with real-time progress from aria2"""
         cmd = ["aria2c", f"--conf-path={self.config_path}", url]
-        logger.info(f"🚀 Starting download: {' '.join(cmd)}")
+        logger.info(f"🚀 Executing: {' '.join(cmd)}")
         
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={**os.environ, 'PATH': '/usr/bin:/usr/local/bin:/bin:/usr/sbin:/usr/local/sbin'}
+            stderr=subprocess.PIPE
         )
         
-        task.download_start = datetime.now()  # ✅ Set download start time
+        task.download_start = datetime.now()
         
-        # ✅ NEW: Real-time progress parser
-        async def read_progress():
+        # Parse progress
+        async def parse_progress():
             while True:
                 line = await process.stdout.readline()
                 if not line:
                     break
-                
                 line = line.decode().strip()
                 
-                # Parse aria2 output: [DL:1.2MiB/100MiB(1%)] ...
+                # aria2 output format: [DL:1.2MiB/100MiB(12%)]
                 if '[DL:' in line and '%)' in line:
                     try:
-                        # Extract sizes
-                        size_match = re.search(r'\[DL:([^\)]+)\((\d+)%\)\]', line)
-                        if size_match:
-                            size_str = size_match.group(1)  # "1.2MiB/100MiB"
-                            percent = int(size_match.group(2))
+                        # Extract progress
+                        match = re.search(r'\[DL:([^\)]+)\((\d+)%\)', line)
+                        if match:
+                            size_part = match.group(1)  # "1.2MiB/100MiB"
+                            percent = int(match.group(2))
                             
-                            # Parse downloaded amount
-                            downloaded_str = size_str.split('/')[0]
+                            # Parse downloaded size
+                            downloaded_str = size_part.split('/')[0]
+                            downloaded = self._parse_size(downloaded_str)
                             
-                            # Convert to bytes for progress bar
-                            if 'GiB' in downloaded_str:
-                                downloaded = float(downloaded_str.replace('GiB', '')) * 1024**3
-                            elif 'MiB' in downloaded_str:
-                                downloaded = float(downloaded_str.replace('MiB', '')) * 1024**2
-                            elif 'KiB' in downloaded_str:
-                                downloaded = float(downloaded_str.replace('KiB', '')) * 1024
-                            else:
-                                downloaded = float(downloaded_str)
+                            # Estimate total
+                            total = (downloaded * 100 / percent) if percent > 0 else downloaded
                             
-                            # Get total size if available
-                            total_str = size_str.split('/')[1] if '/' in size_str else None
-                            
-                            if task.download_start:
-                                progress_text = await detailed_progress(
-                                    int(downloaded), 
-                                    int(downloaded * 100 / percent) if percent > 0 else int(downloaded),
-                                    task.download_start,
-                                    "📥 Downloading"
-                                )
-                                try:
-                                    await task.status_msg.edit_text(progress_text)
-                                except:
-                                    pass
-                    
+                            progress_text = await detailed_progress(int(downloaded), int(total), task.download_start, "📥 Downloading")
+                            try:
+                                await task.status_msg.edit_text(progress_text)
+                            except Exception as e:
+                                logger.debug(f"Progress update failed: {e}")
                     except Exception as e:
                         logger.debug(f"Parse error: {e}")
         
-        # Start reading progress
-        progress_task = asyncio.create_task(read_progress())
+        # Start progress parser
+        progress_task = asyncio.create_task(parse_progress())
         
         # Wait for completion
         await process.wait()
@@ -246,18 +182,41 @@ log-level=error
                 return downloaded
         
         stderr = await process.stderr.read()
-        logger.error(f"❌ aria2c failed: {stderr.decode()}")
+        logger.error(f"❌ aria2c failed (code {process.returncode}): {stderr.decode()}")
         return None
+    
+    def _parse_size(self, size_str: str) -> float:
+        """Convert size string to bytes"""
+        size_str = size_str.strip()
+        if 'GiB' in size_str:
+            return float(size_str.replace('GiB', '')) * 1024**3
+        elif 'MiB' in size_str:
+            return float(size_str.replace('MiB', '')) * 1024**2
+        elif 'KiB' in size_str:
+            return float(size_str.replace('KiB', '')) * 1024
+        else:
+            return float(size_str)
 
 class YTDLManager:
-    async def download(self, url: str, task_id: str) -> Optional[Path]:
-        cmd = ["yt-dlp", url, "-o", str(DOWNLOAD_DIR / '%(title)s.%(ext)s'), "--quiet"]
-        process = await asyncio.create_subprocess_exec(*cmd)
-        await process.wait()
+    # ✅ FIXED: Added task parameter
+    async def download(self, url: str, task_id: str, task: DownloadTask) -> Optional[Path]:
+        """Download with yt-dlp (no progress parsing for simplicity)"""
+        output_template = str(DOWNLOAD_DIR / '%(title)s.%(ext)s')
+        cmd = ["yt-dlp", url, "-o", output_template, "--quiet"]
+        
+        logger.info(f"🎬 Executing: {' '.join(cmd)}")
+        
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = await process.communicate()
         
         if process.returncode == 0:
             files = list(DOWNLOAD_DIR.glob('*'))
-            return max(files, key=lambda f: f.stat().st_mtime) if files else None
+            if files:
+                downloaded = max(files, key=lambda f: f.stat().st_mtime)
+                logger.info(f"✅ Download complete: {downloaded.name}")
+                return downloaded
+        
+        logger.error(f"❌ yt-dlp failed (code {process.returncode}): {stderr.decode()}")
         return None
 
 class UploadManager:
@@ -274,44 +233,51 @@ class UploadManager:
                 await self._split_upload(file_path, chat_id, task_id, status_msg, task)
                 return
             
-            # ✅ Create persistent error message
-            error_msg = await status_msg.reply_text("⏳ Preparing upload...")
-            
-            progress_text = await detailed_progress(0, file_size, datetime.now(), "📤 Uploading")
-            await status_msg.edit_text(progress_text)
-            
-            # ✅ Track upload start time
             upload_start = datetime.now()
+            
+            # ✅ Double-check channel is valid
+            try:
+                await bot.get_chat(chat_id)
+                logger.info(f"✅ Channel {chat_id} is accessible")
+            except Exception as e:
+                logger.error(f"❌ Cannot access channel {chat_id}: {e}")
+                await status_msg.edit_text(f"❌ Dump channel error: {e}\nIs bot admin?")
+                return
+            
+            progress_text = await detailed_progress(0, file_size, upload_start, "📤 Uploading")
+            await status_msg.edit_text(progress_text)
             
             async def progress(current: int, total: int):
                 try:
-                    # Update every 3 seconds
-                    if (datetime.now().second % 3) == 0:
+                    # Update every 4 seconds
+                    if (datetime.now().second % 4) == 0:
                         progress_text = await detailed_progress(current, total, upload_start, "📤 Uploading")
                         asyncio.create_task(status_msg.edit_text(progress_text))
                 except Exception as e:
                     logger.debug(f"Progress error: {e}")
             
             ext = file_path.suffix.lower()
-            if ext in ['.mp4', '.mkv', '.avi', '.mov']:
-                sent_msg = await bot.send_video(chat_id, str(file_path), caption=file_path.name, progress=progress)
-            else:
-                sent_msg = await bot.send_document(chat_id, str(file_path), caption=file_path.name, progress=progress)
+            caption = f"<code>{file_path.name}</code>"
             
-            if sent_msg:
-                await error_msg.delete()
-                await status_msg.edit_text("✅ Upload completed successfully!")
-                logger.info(f"✅ Uploaded: {file_path.name} ({human_size(file_size)})")
-                
-                # ✅ Verify upload
-                try:
-                    await bot.get_messages(chat_id, sent_msg.id)
-                    logger.info(f"✅ Verified in channel: {chat_id}")
-                except:
-                    logger.error(f"❌ Upload verification failed for {sent_msg.id}")
+            if ext in ['.mp4', '.mkv', '.avi', '.mov']:
+                sent_msg = await bot.send_video(chat_id, str(file_path), caption=caption, progress=progress)
             else:
-                logger.error("❌ send_video/document returned None")
-                await error_msg.edit_text("❌ Upload failed: No message returned")
+                sent_msg = await bot.send_document(chat_id, str(file_path), caption=caption, progress=progress)
+            
+            if sent_msg and sent_msg.id:
+                logger.info(f"✅ Upload SUCCESS: {file_path.name} -> channel {chat_id}")
+                await status_msg.edit_text("✅ Upload completed successfully!")
+                
+                # ✅ Verify in channel
+                try:
+                    await asyncio.sleep(2)
+                    await bot.get_messages(chat_id, sent_msg.id)
+                    logger.info(f"✅ Message verified in channel: {sent_msg.id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Verification warning: {e}")
+            else:
+                logger.error("❌ send_video/document returned None or invalid")
+                await status_msg.edit_text("❌ Upload failed: No message returned from Telegram")
                 
         except FloodWait as e:
             logger.warning(f"⏳ FloodWait: {e.value}s")
@@ -319,9 +285,7 @@ class UploadManager:
             await self.upload(file_path, chat_id, task_id, status_msg, task)
         except Exception as e:
             logger.error(f"❌ Upload error: {e}", exc_info=True)
-            if task.error_msg:
-                await task.error_msg.edit_text(f"❌ Upload error: {str(e)}")
-            await status_msg.edit_text("❌ Upload failed!")
+            await status_msg.edit_text(f"❌ Upload failed: {str(e)}")
 
     async def _split_upload(self, file_path: Path, chat_id: int, task_id: str, status_msg: Message, task: DownloadTask):
         split_dir = DOWNLOAD_DIR / "splits"
@@ -375,12 +339,14 @@ async def leech_command(client, message: Message):
         await message.reply_text("Usage: `/leech <download_link>`")
         return
     
-    url = message.command[1].strip()
-    logger.info(f"🔗 URL Received: {url}")
-    logger.info(f"📊 URL Length: {len(url)} bytes")
+    # ✅ Handle quotes and clean URL
+    full_text = message.text
+    url = full_text.split(maxsplit=1)[1].strip()
+    
+    logger.info(f"🔗 URL Received: {url[:100]}...")
     
     if not is_url_valid(url):
-        logger.error(f"❌ Invalid URL format: {url[:100]}...")
+        logger.error(f"❌ Invalid URL format")
         await message.reply_text("❌ Invalid URL format!")
         return
     
@@ -390,103 +356,87 @@ async def leech_command(client, message: Message):
     task = DownloadTask(task_id, url, status_msg)
     tasks[task_id] = task
     
-    # ✅ Create persistent error message
-    task.error_msg = await status_msg.reply_text("⏳ Initializing...")
-    
     asyncio.create_task(process_download(task))
 
 async def process_download(task: DownloadTask):
     try:
-        # Clear error message
-        if task.error_msg:
-            await task.error_msg.delete()
-            task.error_msg = None
-        
-        logger.info(f"🎯 Processing task: {task.task_id}")
+        logger.info(f"🎯 Processing: {task.task_id}")
         logger.info(f"📡 URL: {task.url}")
         
-        # Show initial progress
         progress_text = await detailed_progress(0, 1, datetime.now(), "📥 Downloading")
         await task.status_msg.edit_text(progress_text)
         
-        # Choose downloader
         if is_torrent(task.url):
-            logger.info("🧲 Detected torrent/magnet link")
+            logger.info("🧲 Magnet/torrent detected")
             downloader = AriaManager()
         else:
-            logger.info("🔗 Detected direct/yt-dlp link")
+            logger.info("🔗 Direct/YouTube link detected")
             downloader = YTDLManager()
         
         file_path = await downloader.download(task.url, task.task_id, task)
         
         if not file_path or not file_path.exists():
-            logger.error(f"❌ Download failed: file_path={file_path}")
-            await task.status_msg.edit_text("❌ Download failed or file not found!")
+            logger.error(f"❌ Download failed")
+            await task.status_msg.edit_text("❌ Download failed!")
             return
         
         file_size = file_path.stat().st_size
-        logger.info(f"✅ Download SUCCESS: {file_path.name} ({human_size(file_size)})")
+        logger.info(f"✅ Downloaded: {file_path.name} ({human_size(file_size)})")
         
         await task.status_msg.edit_text(
-            f"✅ Download complete!\n"
-            f"📁 File: {file_path.name}\n"
-            f"📊 Size: {human_size(file_size)}\n"
-            f"🚀 Starting upload..."
+            f"✅ Download complete!\n📁 {file_path.name}\n📊 {human_size(file_size)}\n🚀 Starting upload..."
         )
         
+        # Upload
         uploader = UploadManager()
         await uploader.upload(file_path, DUMP_CHANNEL_ID, task.task_id, task.status_msg, task)
         
         # Cleanup
         if file_path.exists():
             if file_path.is_file():
-                logger.info(f"🗑️ Deleting file: {file_path}")
                 file_path.unlink()
             else:
                 import shutil
-                logger.info(f"🗑️ Deleting folder: {file_path}")
                 shutil.rmtree(file_path)
         
         await task.status_msg.edit_text("✅ Task completed successfully!")
         
     except Exception as e:
-        logger.error(f"❌ CRITICAL ERROR in process_download: {e}", exc_info=True)
-        error_details = f"❌ Error: {str(e)}\n\nTask ID: {task.task_id}"
-        
-        # Keep error message persistent
-        if task.error_msg:
-            await task.error_msg.edit_text(error_details)
-        else:
-            await task.status_msg.reply_text(error_details)
-        
-        await task.status_msg.edit_text("❌ Task failed!")
+        logger.error(f"❌ Failed: {e}", exc_info=True)
+        await task.status_msg.edit_text(f"❌ Error: {str(e)}")
     finally:
         tasks.pop(task.task_id, None)
 
 # === MAIN ===
 if __name__ == "__main__":
     logger.info("="*60)
-    logger.info("🔰 LEECHBOT PRO - PRODUCTION MODE")
+    logger.info("🔰 LEECHBOT PRO PRODUCTION")
     logger.info("="*60)
     
     if DUMP_CHANNEL_ID == 0:
-        logger.error("❌ CRITICAL: DUMP_CHANNEL_ID not set!")
+        logger.error("❌ DUMP_CHANNEL_ID not set!")
         sys.exit(1)
     
-    logger.info(f"📡 DUMP_CHANNEL_ID: {DUMP_CHANNEL_ID}")
-    logger.info(f"👤 OWNER_ID: {OWNER_ID}")
-    logger.info(f"💾 MAX_FILE_SIZE: {human_size(MAX_FILE_SIZE)}")
+    logger.info(f"📡 Dump Channel: {DUMP_CHANNEL_ID}")
+    logger.info(f"👤 Owner ID: {OWNER_ID}")
     
-    # Verify aria2
-    logger.info("🔍 Verifying aria2 installation...")
-    if not ensure_aria2_installed():
-        logger.error("❌ aria2 verification failed!")
-        logger.error("Quick fix: Use Render SSH to run 'sudo apt-get install aria2'")
+    # Verify aria2 at startup
+    try:
+        result = subprocess.run(['aria2c', '--version'], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            logger.info(f"✅ aria2c verified: {result.stdout.split()[0]}")
+        else:
+            logger.error("❌ aria2c not working!")
+            logger.error("FIX: Run in Render SSH: sudo apt-get install aria2")
+    except:
+        logger.error("❌ aria2c not found!")
+        logger.error("FIX: Add this to render.yaml buildCommand:")
+        logger.error("apt-get update && apt-get install -y aria2")
+        sys.exit(1)
     
-    logger.info("🚀 Starting web server...")
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     time.sleep(2)
     
-    logger.info("🤖 Starting bot client...")
+    logger.info("🤖 Bot starting...")
     bot.run()
