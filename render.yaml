@@ -1,5 +1,5 @@
 services:
-  - type: worker  # CHANGE THIS from "web" to "worker"
+  - type: worker
     name: leech-bot-pro
     env: python
     buildCommand: |
@@ -20,6 +20,8 @@ services:
         sync: false
       - key: PYTHONUNBUFFERED
         value: 1
+      - key: RUNTIME  # Force worker mode
+        value: worker
     disk:
       name: downloads
       mountPath: /opt/render/project/src/downloads
