@@ -2,22 +2,12 @@ services:
   - type: web
     name: leech-bot-pro
     env: python
-    buildCommand: |
-      # ✅ CRITICAL: Install packages at BUILD TIME
-      apt-get update -qq
-      apt-get install -y aria2 ffmpeg
-      
-      # ✅ VERIFY Installation (build fails if missing)
-      echo "Checking aria2c..."
-      which aria2c && aria2c --version
-      
-      echo "Checking ffmpeg..."
-      which ffmpeg && ffmpeg -version
-      
-      # Install Python packages
-      pip install --upgrade pip setuptools wheel
-      pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    # ✅ CRITICAL: Render's native package manager
+    nativePackages:
+      - aria2
+      - ffmpeg
     envVars:
       - key: API_ID
         value: 2819362
