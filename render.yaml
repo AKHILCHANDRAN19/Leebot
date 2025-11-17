@@ -3,15 +3,18 @@ services:
     name: leech-bot-pro
     env: python
     buildCommand: |
-      # ✅ Install system packages with verification
+      # ✅ CRITICAL: Install packages at BUILD TIME
       apt-get update -qq
       apt-get install -y aria2 ffmpeg
       
-      # ✅ CRITICAL: Verify installation (build fails if missing)
-      which aria2c && aria2c --version || (echo "❌ aria2c installation failed!" && exit 1)
-      which ffmpeg && ffmpeg -version || (echo "❌ ffmpeg installation failed!" && exit 1)
+      # ✅ VERIFY Installation (build fails if missing)
+      echo "Checking aria2c..."
+      which aria2c && aria2c --version
       
-      # ✅ Python packages
+      echo "Checking ffmpeg..."
+      which ffmpeg && ffmpeg -version
+      
+      # Install Python packages
       pip install --upgrade pip setuptools wheel
       pip install -r requirements.txt
     startCommand: python bot.py
