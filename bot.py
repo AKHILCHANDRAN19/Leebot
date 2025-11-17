@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Web Service LeechBot - Bot runs in background, web server is main process
-import os, re, asyncio, subprocess, logging, sys
+# Web Service LeechBot - Bot runs in main thread, web server in background
+import os, re, asyncio, subprocess, logging, threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
 import uvicorn
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors import FloodWait
 from dotenv import load_dotenv
@@ -22,6 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXp
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DUMP_CHANNEL_ID = int(os.getenv("DUMP_CHANNEL_ID", "0"))
 
+# Cross-check: These credentials are correct in your script
 WORK_DIR = Path("bot_data")
 WORK_DIR.mkdir(exist_ok=True, parents=True)
 DOWNLOAD_DIR = WORK_DIR / "downloads"
@@ -74,7 +74,7 @@ seed-ratio=0
 seed-time=0
 enable-dht=true
 allow-overwrite=true
-quiet=true
+log-level=error
 """
         self.config_path.write_text(config)
     
@@ -137,29 +137,27 @@ class UploadManager:
             await self.upload(part, chat_id, task_id)
             part.unlink()
 
-# === FASTAPI WEB SERVER ===
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Start bot when web server starts"""
-    logger.info("Starting bot...")
-    await bot.start()
-    logger.info("Bot started successfully")
-    yield
-    logger.info("Stopping bot...")
-    await bot.stop()
-    logger.info("Bot stopped")
+# === WEB SERVER (Runs in background thread) ===
+def run_web_server():
+    """Run FastAPI server in background thread"""
+    try:
+        web_app = FastAPI()
+        
+        @web_app.get("/", response_class=PlainTextResponse)
+        async def root():
+            return "LeechBot Pro Web Service is running"
+        
+        @web_app.get("/health", response_class=PlainTextResponse)
+        async def health():
+            return "OK"
+        
+        port = int(os.environ.get("PORT", 10000))
+        uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="info", access_log=False)
+    except Exception as e:
+        logger.error(f"Web server error: {e}")
+        sys.exit(1)
 
-web_app = FastAPI(lifespan=lifespan)
-
-@web_app.get("/", response_class=PlainTextResponse)
-async def root():
-    return "LeechBot Pro Web Service is running"
-
-@web_app.get("/health", response_class=PlainTextResponse)
-async def health():
-    return "OK"
-
-# === BOT HANDLERS ===
+# === BOT HANDLERS (Main thread) ===
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message: Message):
     await message.reply_text(
@@ -192,7 +190,7 @@ async def process_download(task: DownloadTask):
         downloader = AriaManager() if is_torrent(task.url) else YTDLManager()
         file_path = await downloader.download(task.url, task.task_id)
         
-        if not file_path:
+        if not file_path or not file_path.exists():
             await task.status_msg.edit_text("❌ Download failed!")
             return
         
@@ -215,8 +213,13 @@ async def process_download(task: DownloadTask):
     finally:
         tasks.pop(task.task_id, None)
 
-# === ENTRY POINT ===
+# === MAIN ===
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting web server on port {port}...")
-    uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="info")
+    # 1. Start web server in background thread
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    time.sleep(2)  # Give web server time to start
+    
+    # 2. Run bot in main thread (this is the key!)
+    logger.info("Starting bot in main thread...")
+    bot.run()  # This blocks and handles updates properly
