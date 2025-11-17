@@ -7,3 +7,5 @@ moviepy
 Pillow
 natsort
 psutil
+fastapi
+uvicorn[standard]
