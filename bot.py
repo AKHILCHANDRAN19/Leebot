@@ -18,8 +18,8 @@ load_dotenv()
 API_ID = int(os.getenv("API_ID", "2819362"))
 API_HASH = os.getenv("API_HASH", "578ce3d09fadd539544a327c45b55ee4")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0")
-OWNER_ID = int(os.getenv("OWNER_ID", "6219290068"))  # ✅ YOUR OWNER ID
-DUMP_CHANNEL_ID = int(os.getenv("DUMP_CHANNEL_ID", "-1003286196892"))  # ✅ YOUR DUMP CHANNEL ID
+OWNER_ID = int(os.getenv("OWNER_ID", "6219290068"))
+DUMP_CHANNEL_ID = int(os.getenv("DUMP_CHANNEL_ID", "-1003286196892"))
 
 WORK_DIR = Path("bot_data")
 WORK_DIR.mkdir(exist_ok=True, parents=True)
@@ -45,7 +45,6 @@ tasks: Dict[str, DownloadTask] = {}
 
 # === UTILITIES ===
 def is_url_valid(url: str) -> bool:
-    # ✅ FIXED: Correct regex for magnet links
     return bool(re.match(r'^(https?|ftp)://|^magnet:\?xt=urn:', url))
 
 def is_torrent(url: str) -> bool:
@@ -58,7 +57,6 @@ def human_size(size: int) -> str:
         size /= 1024
     return f"{size:.1f} PB"
 
-# ✅ NEW: Detailed progress bar generator
 def create_progress_bar(percentage: float, width: int = 10) -> str:
     filled = int(percentage / 100 * width)
     return "▪" * filled + "▫" * (width - filled)
@@ -69,7 +67,6 @@ async def detailed_progress(current: int, total: int, start_time: datetime, acti
     percentage = (current / total) * 100
     eta = (total - current) / speed if speed > 0 else 0
     
-    # Convert ETA to minutes/seconds
     minutes, seconds = divmod(int(eta), 60)
     eta_str = f"{minutes}m, {seconds}s" if minutes > 0 else f"{seconds}s"
     
@@ -84,11 +81,46 @@ async def detailed_progress(current: int, total: int, start_time: datetime, acti
         "Thanks for using this bot"
     )
 
+# ✅ NEW: Install aria2 if missing (Render-specific fix)
+def ensure_aria2_installed():
+    """Ensure aria2 is installed. If not, install it."""
+    try:
+        # Check if aria2c exists
+        result = subprocess.run(['which', 'aria2c'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"aria2c found at: {result.stdout.strip()}")
+            return True
+        
+        logger.warning("aria2c NOT found in PATH. Attempting to install...")
+        
+        # Try to install aria2
+        install_cmd = ['apt-get', 'update', '&&', 'apt-get', 'install', '-y', 'aria2']
+        logger.info(f"Running: {' '.join(install_cmd)}")
+        
+        # Use shell=True to allow command chaining
+        subprocess.run(' '.join(install_cmd), shell=True, check=True, capture_output=True)
+        
+        # Verify installation
+        verify = subprocess.run(['which', 'aria2c'], capture_output=True, text=True)
+        if verify.returncode == 0:
+            logger.info(f"aria2c installed successfully at: {verify.stdout.strip()}")
+            return True
+        else:
+            logger.error("Failed to install aria2c")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error installing aria2c: {e}")
+        return False
+
 # === DOWNLOAD MANAGERS ===
 class AriaManager:
     def __init__(self):
         self.config_path = WORK_DIR / "aria2.conf"
         self._setup_config()
+        # ✅ Ensure aria2 is available
+        if not ensure_aria2_installed():
+            raise RuntimeError("aria2c is not installed and could not be installed automatically!")
     
     def _setup_config(self):
         config = f"""dir={DOWNLOAD_DIR}
@@ -105,14 +137,32 @@ log-level=error
         self.config_path.write_text(config)
     
     async def download(self, url: str, task_id: str) -> Optional[Path]:
+        # ✅ Log the exact command
         cmd = ["aria2c", f"--conf-path={self.config_path}", url]
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        await process.wait()
+        logger.info(f"Running aria2 command: {' '.join(cmd)}")
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            env={**os.environ, 'PATH': '/usr/bin:/usr/local/bin:/bin'}  # Force PATH
+        )
+        
+        stdout, stderr = await process.communicate()
         
         if process.returncode == 0:
             files = list(DOWNLOAD_DIR.glob('*'))
-            return max(files, key=lambda f: f.stat().st_mtime) if files else None
-        return None
+            if files:
+                downloaded = max(files, key=lambda f: f.stat().st_mtime)
+                logger.info(f"Downloaded file: {downloaded}")
+                return downloaded
+            else:
+                logger.error("aria2c succeeded but no files found!")
+                return None
+        else:
+            logger.error(f"aria2c failed with code {process.returncode}")
+            logger.error(f"stderr: {stderr.decode()}")
+            return None
 
 class YTDLManager:
     async def download(self, url: str, task_id: str) -> Optional[Path]:
@@ -128,7 +178,6 @@ class YTDLManager:
 class UploadManager:
     async def upload(self, file_path: Path, chat_id: int, task_id: str, status_msg: Message):
         try:
-            # ✅ FIXED: Check if file exists before uploading
             if not file_path.exists():
                 logger.error(f"File not found: {file_path}")
                 await status_msg.edit_text("❌ File not found after download!")
@@ -140,13 +189,11 @@ class UploadManager:
                 await self._split_upload(file_path, chat_id, task_id, status_msg)
                 return
             
-            # ✅ NEW: Detailed download progress bar
             progress_text = await detailed_progress(0, file_size, datetime.now(), "📤 Uploading")
             await status_msg.edit_text(progress_text)
             
             async def progress(current: int, total: int):
                 try:
-                    # ✅ NEW: Update progress bar every 5 seconds to avoid FloodWait
                     if (datetime.now().second % 5) == 0:
                         progress_text = await detailed_progress(current, total, datetime.now(), "📤 Uploading")
                         asyncio.create_task(status_msg.edit_text(progress_text))
@@ -159,7 +206,6 @@ class UploadManager:
             else:
                 sent_msg = await bot.send_document(chat_id, str(file_path), caption=file_path.name, progress=progress)
             
-            # ✅ NEW: Verify upload success
             if sent_msg:
                 await status_msg.edit_text("✅ Upload completed successfully!")
                 logger.info(f"Uploaded {file_path.name} to {chat_id}")
@@ -185,7 +231,7 @@ class UploadManager:
         for i, part in enumerate(parts, 1):
             await status_msg.edit_text(f"📤 Uploading part {i}/{len(parts)}...")
             await self.upload(part, chat_id, task_id, status_msg)
-            part.unlink()  # Clean up part after upload
+            part.unlink()
 
 # === WEB SERVER (Runs in background thread) ===
 def run_web_server():
@@ -223,9 +269,7 @@ async def leech_command(client, message: Message):
         await message.reply_text("Usage: `/leech <download_link>`")
         return
     
-    url = message.command[1].strip()  # ✅ Strip whitespace
-    
-    # ✅ DEBUG: Log the URL
+    url = message.command[1].strip()
     logger.info(f"Received URL: {url}")
     
     if not is_url_valid(url):
@@ -242,7 +286,6 @@ async def leech_command(client, message: Message):
 
 async def process_download(task: DownloadTask):
     try:
-        # ✅ NEW: Show detailed download progress
         await task.status_msg.edit_text("📥 Downloading... 0%")
         
         downloader = AriaManager() if is_torrent(task.url) else YTDLManager()
@@ -252,7 +295,6 @@ async def process_download(task: DownloadTask):
             await task.status_msg.edit_text("❌ Download failed or file not found!")
             return
         
-        # ✅ Verify file exists and log it
         file_size = file_path.stat().st_size
         logger.info(f"Downloaded: {file_path} ({human_size(file_size)})")
         
@@ -261,7 +303,6 @@ async def process_download(task: DownloadTask):
         uploader = UploadManager()
         await uploader.upload(file_path, DUMP_CHANNEL_ID, task.task_id, task.status_msg)
         
-        # ✅ Cleanup
         if file_path.exists():
             if file_path.is_file():
                 file_path.unlink()
@@ -269,7 +310,6 @@ async def process_download(task: DownloadTask):
                 import shutil
                 shutil.rmtree(file_path)
         
-        # ✅ Final success message
         await task.status_msg.edit_text("✅ Task completed successfully!")
         
     except Exception as e:
@@ -280,14 +320,18 @@ async def process_download(task: DownloadTask):
 
 # === MAIN ===
 if __name__ == "__main__":
-    # ✅ Verify critical env vars
     if DUMP_CHANNEL_ID == 0:
         logger.error("DUMP_CHANNEL_ID not set! Set it in Render environment variables.")
         sys.exit(1)
     if OWNER_ID == 0:
         logger.warning("OWNER_ID not set. Bot may not function correctly.")
     
-    # Start web server in background thread
+    # ✅ NEW: Ensure aria2 is installed before starting
+    logger.info("Checking aria2 installation...")
+    if not ensure_aria2_installed():
+        logger.error("❌ CRITICAL: aria2c could not be installed. Magnet/Torrent downloads will fail!")
+        logger.error("Please check Render logs and manually install aria2 via SSH.")
+    
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     time.sleep(2)
