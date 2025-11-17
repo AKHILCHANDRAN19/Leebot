@@ -6,7 +6,7 @@ services:
       apt-get update && apt-get install -y aria2 ffmpeg
       pip install --upgrade pip setuptools wheel
       pip install -r requirements.txt
-    startCommand: python bot.py  # Must match your filename
+    startCommand: python bot.py
     envVars:
       - key: API_ID
         value: 2819362
@@ -20,8 +20,4 @@ services:
         sync: false
       - key: PORT
         value: 10000
-    disk:
-      name: downloads
-      mountPath: /opt/render/project/src/downloads
-      sizeGB: 50
     plan: starter
