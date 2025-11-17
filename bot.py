@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Web Service LeechBot - Bot runs in main thread, web server in background
-import os, re, asyncio, subprocess, logging, threading
+import os, re, asyncio, subprocess, logging, threading, sys, time  # ✅ ADDED sys & time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -21,7 +21,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXp
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DUMP_CHANNEL_ID = int(os.getenv("DUMP_CHANNEL_ID", "0"))
 
-# Cross-check: These credentials are correct in your script
 WORK_DIR = Path("bot_data")
 WORK_DIR.mkdir(exist_ok=True, parents=True)
 DOWNLOAD_DIR = WORK_DIR / "downloads"
@@ -155,7 +154,7 @@ def run_web_server():
         uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="info", access_log=False)
     except Exception as e:
         logger.error(f"Web server error: {e}")
-        sys.exit(1)
+        sys.exit(1)  # ✅ sys now imported
 
 # === BOT HANDLERS (Main thread) ===
 @bot.on_message(filters.command("start") & filters.private)
@@ -218,7 +217,7 @@ if __name__ == "__main__":
     # 1. Start web server in background thread
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
-    time.sleep(2)  # Give web server time to start
+    time.sleep(2)  # ✅ FIXED: time is now imported
     
     # 2. Run bot in main thread (this is the key!)
     logger.info("Starting bot in main thread...")
