@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Single-File LeechBot Pro for Render Web Service (Python 3.13+)
-import os, re, asyncio, subprocess, logging, uvicorn, sys
+import os, re, asyncio, subprocess, logging, sys
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
-import pyrogram
+import uvicorn
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors import FloodWait
@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 
 # === CONFIGURATION ===
 load_dotenv()
-
 API_ID = int(os.getenv("API_ID", "2819362"))
 API_HASH = os.getenv("API_HASH", "578ce3d09fadd539544a327c45b55ee4")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0")
@@ -52,9 +51,6 @@ def is_url_valid(url: str) -> bool:
 
 def is_torrent(url: str) -> bool:
     return url.startswith('magnet:?xt=urn:btih:')
-
-def is_ytdl_supported(url: str) -> bool:
-    return any(x in url for x in ['youtube.com', 'youtu.be', 'instagram.com', 'facebook.com', 'twitter.com', 'x.com'])
 
 def human_size(size: int) -> str:
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -222,8 +218,11 @@ async def process_download(task: DownloadTask):
     finally:
         tasks.pop(task.task_id, None)
 
+# === ENTRY POINT ===
 if __name__ == "__main__":
-    # Start with uvicorn (Render will provide PORT env var)
+    # Render provides PORT env var
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"Starting on port {port}")
-    uvicorn.run("main:web_app", host="0.0.0.0", port=port, log_level="info")
+    logger.info(f"Starting LeechBot Pro on port {port}")
+    
+    # Run FastAPI + bot together
+    uvicorn.run(web_app, host="0.0.0.0", port=port, log_level="info")
