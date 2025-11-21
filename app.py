@@ -11,17 +11,21 @@ from pyrogram.types import Message
 import aioaria2
 
 # --- CONFIGURATION ---
-API_ID = os.environ.get("API_ID", "2819362")
+# Hardcoded credentials as requested (though Env Vars in Render are safer)
+API_ID = int(os.environ.get("API_ID", "2819362"))
 API_HASH = os.environ.get("API_HASH", "578ce3d09fadd539544a327c45b55ee4")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8390475015:AAF8dauJYTWFwktTQABzG17_-JTN4r71R3M")
-PORT = int(os.environ.get("PORT", 8080))
+PORT = int(os.environ.get("PORT", 10000))
 
 # WZML-X Custom Binary Names
 ARIA2_BIN = "blitzfetcher" # In standard systems this is 'aria2c'
 DOWNLOAD_DIR = "/app/downloads/"
 
 # Logging Setup
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger("WZML-Leech")
 
 # --- WEB SERVER (HEALTH CHECK) ---
@@ -50,6 +54,7 @@ async def start_aria2():
         os.makedirs(DOWNLOAD_DIR)
 
     # Check if custom binary exists, else fall back to standard
+    # The WZML image uses 'blitzfetcher'
     cmd = [ARIA2_BIN] if shutil.which(ARIA2_BIN) else ["aria2c"]
     
     cmd.extend([
@@ -68,8 +73,8 @@ async def start_aria2():
     
     try:
         subprocess.Popen(cmd)
-        logger.info(f"{cmd[0]} daemon started.")
-        await asyncio.sleep(2) # Wait for it to initialize
+        logger.info(f"{cmd[0]} daemon started successfully.")
+        await asyncio.sleep(3) # Wait for it to initialize
     except Exception as e:
         logger.error(f"Failed to start Aria2: {e}")
 
@@ -84,7 +89,7 @@ app = Client(
 async def download_monitor(aria2_client, gid, message: Message):
     """Monitors download progress and triggers upload on completion."""
     last_status = ""
-    status_msg = await message.reply_text("⬇️ **Download Started...**")
+    status_msg = await message.reply_text("⬇️ **Download Initialized...**")
     
     while True:
         try:
@@ -101,13 +106,14 @@ async def download_monitor(aria2_client, gid, message: Message):
                 text = f"⬇️ **Downloading...**\nProgress: {prog:.2f}%\nSpeed: {speed:.2f} MB/s"
                 if text != last_status:
                     try:
-                        await status_msg.edit_text(text)
-                        last_status = text
+                        if (time.time() % 5) < 1: # Simple throttle
+                            await status_msg.edit_text(text)
+                            last_status = text
                     except:
                         pass
             
             elif curr_status == 'complete':
-                await status_msg.edit_text("✅ **Download Complete! Uploading...**")
+                await status_msg.edit_text("✅ **Download Complete! Processing Upload...**")
                 
                 # Get file path
                 files = await aria2_client.getFiles(gid)
@@ -124,16 +130,22 @@ async def download_monitor(aria2_client, gid, message: Message):
                     )
                     await status_msg.delete()
                     # Cleanup
-                    os.remove(filepath)
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
                 except Exception as up_e:
                     await status_msg.edit_text(f"❌ Upload Failed: {up_e}")
                 break
                 
             elif curr_status == 'error':
-                await status_msg.edit_text("❌ Download Error occured.")
+                err_msg = status.get('errorMessage', 'Unknown Error')
+                await status_msg.edit_text(f"❌ Download Error: {err_msg}")
+                break
+            
+            elif curr_status == 'removed':
+                await status_msg.edit_text("❌ Task Removed.")
                 break
                 
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
             
         except Exception as e:
             logger.error(f"Monitor Error: {e}")
@@ -143,7 +155,7 @@ async def progress_callback(current, total, msg):
     """Upload Progress."""
     if total > 0:
         percentage = current * 100 / total
-        if int(percentage) % 10 == 0: # Update every 10%
+        if int(percentage) % 10 == 0 and int(percentage) != 0:
             try:
                 await msg.edit_text(f"⬆️ **Uploading:** {percentage:.1f}%")
             except:
@@ -160,28 +172,42 @@ async def start_handler(client, message):
 @app.on_message(filters.text | filters.document)
 async def leech_handler(client, message):
     link = None
+    is_torrent_file = False
     
     # Check if text link (Magnet or HTTP)
     if message.text:
-        if message.text.startswith(("http", "magnet:")):
+        if message.text.startswith(("http", "magnet:", "www")):
             link = message.text.strip()
 
     # Check if Torrent file
     elif message.document and message.document.file_name.endswith(".torrent"):
         status = await message.reply_text("📥 **Downloading .torrent file...**")
-        file_path = await message.download(file_name=f"{DOWNLOAD_DIR}temp.torrent")
+        file_path = await message.download(file_name=f"{DOWNLOAD_DIR}temp_{time.time()}.torrent")
         link = file_path
+        is_torrent_file = True
         await status.delete()
 
     if not link:
         return # Ignore non-link messages
 
     try:
-        # Connect to Aria2
+        # Connect to Aria2 RPC
         async with aioaria2.Aria2HttpClient("http://localhost:6800/jsonrpc") as aria2:
-            if link.endswith(".torrent") or os.path.exists(link):
-                # Add Torrent File
-                gid = await aria2.addTorrent(link)
+            if is_torrent_file or os.path.exists(link):
+                # Add Torrent File (returns GID)
+                # Note: aioaria2 might require reading the file and base64 encoding it, 
+                # but addTorrent usually takes path in local CLI mode. 
+                # For XML-RPC, we often use addUri for magnets or local paths if daemon has access.
+                # Attempting standard addUri for local file path if it exists
+                if is_torrent_file:
+                     # Specific handling for .torrent files via RPC might require reading content
+                     # But simplistic approach:
+                     import base64
+                     with open(link, "rb") as f:
+                         torrent_content = base64.b64encode(f.read()).decode('utf-8')
+                     gid = await aria2.addTorrent(torrent_content)
+                else:
+                     gid = await aria2.addUri([link])
             else:
                 # Add URL/Magnet
                 gid = await aria2.addUri([link])
@@ -190,15 +216,15 @@ async def leech_handler(client, message):
             asyncio.create_task(download_monitor(aria2, gid, message))
             
     except Exception as e:
-        await message.reply_text(f"❌ Error adding task: {str(e)}")
+        await message.reply_text(f"❌ Error adding task: {str(e)}\nEnsure the link is valid.")
 
 # --- MAIN EXECUTION ---
 def main():
-    # 1. Start Web Server in Background Thread (The Fix)
+    # 1. Start Web Server in Background Thread
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     
-    # 2. Initialize Aria2 in the Event Loop
+    # 2. Initialize Aria2
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_aria2())
     
