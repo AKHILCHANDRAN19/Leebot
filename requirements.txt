@@ -1,11 +1,5 @@
-pyrogram
-tgcrypto
-python-dotenv
-yt-dlp
+pyrofork
 aiohttp
-moviepy
-Pillow
-natsort
-psutil
-fastapi
-uvicorn[standard]
+aioaria2
+uvloop
+tgcrypto
