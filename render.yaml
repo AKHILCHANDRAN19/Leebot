@@ -1,24 +1,15 @@
 services:
   - type: web
-    name: leech-bot-pro
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
-    # ✅ CRITICAL: Render's native package manager
-    nativePackages:
-      - aria2
-      - ffmpeg
+    name: wzml-leech-bot
+    runtime: docker
+    plan: free
+    startCommand: python3 app.py
     envVars:
       - key: API_ID
-        value: 2819362
+        value: "2819362"
       - key: API_HASH
-        value: 578ce3d09fadd539544a327c45b55ee4
+        value: "578ce3d09fadd539544a327c45b55ee4"
       - key: BOT_TOKEN
-        value: 8290220435:AAHluT9Ns8ydCN9cC6qLpFkoCAK-EmhXpD0
-      - key: OWNER_ID
-        value: 6219290068
-      - key: DUMP_CHANNEL_ID
-        value: -1003286196892
+        value: "8390475015:AAF8dauJYTWFwktTQABzG17_-JTN4r71R3M"
       - key: PORT
-        value: 10000
-    plan: starter
+        value: "10000"
