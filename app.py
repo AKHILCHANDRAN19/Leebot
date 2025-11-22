@@ -1,16 +1,14 @@
 import os
-import asyncio
 import logging
+import threading
 import subprocess
-import shutil
 import time
-import uvloop
+import shutil
+import asyncio
 from aiohttp import web
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
+from pyrogram.types import Message
 import aioaria2
-
-# --- INSTALL UVLOOP FIRST ---
-uvloop.install()
 
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "2819362"))
@@ -19,17 +17,15 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8390475015:AAF8dauJYTWFwktTQABzG17_-JTN
 PORT = int(os.environ.get("PORT", 10000))
 
 DOWNLOAD_DIR = "/app/downloads/"
-ARIA2_BIN = "blitzfetcher" # WZML Binary
+ARIA2_BIN = "blitzfetcher" 
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger("WZML-X")
 
-# --- FORMATTING HELPERS ---
-SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-
+# --- WZML STYLE FORMATTING ---
 def get_readable_file_size(size_in_bytes):
     if size_in_bytes is None: return '0B'
     index = 0
@@ -37,7 +33,7 @@ def get_readable_file_size(size_in_bytes):
         size_in_bytes /= 1024
         index += 1
     try:
-        return f'{round(size_in_bytes, 2)} {SIZE_UNITS[index]}'
+        return f'{round(size_in_bytes, 2)} {["B", "KB", "MB", "GB", "TB", "PB"][index]}'
     except IndexError:
         return '0B'
 
@@ -65,38 +61,57 @@ def get_progress_bar_string(pct):
     p_str += '▫' * (10 - cFull)
     return f"[{p_str}]"
 
-# --- BOT CLIENT ---
-app = Client("wzml_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# --- WEB SERVER LOGIC ---
+# --- WEB SERVER (THREADED) ---
+# This runs in a background thread so it doesn't block the bot
 async def health_check(request):
-    return web.Response(text="WZML-X Active")
+    return web.Response(text="WZML-X Leech Bot Running")
 
-async def start_web_server():
-    server = web.Application()
-    server.router.add_get("/", health_check)
-    runner = web.AppRunner(server)
-    await runner.setup()
+def run_web_server():
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    
+    runner = web.AppRunner(app)
+    loop.run_until_complete(runner.setup())
     site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Web Server Running on Port {PORT}")
+    loop.run_until_complete(site.start())
+    logger.info(f"Web Server started on port {PORT}")
+    loop.run_forever()
 
-# --- ARIA2 LOGIC ---
-def start_aria2_daemon():
+# --- ARIA2 MANAGER ---
+def start_aria2():
     if not os.path.exists(DOWNLOAD_DIR): os.makedirs(DOWNLOAD_DIR)
+    
+    # Select Binary
     binary = shutil.which(ARIA2_BIN) or "aria2c"
+    
     cmd = [
         binary,
-        "--enable-rpc", "--rpc-listen-all=false", "--rpc-listen-port=6800",
-        "--max-connection-per-server=16", "--rpc-max-request-size=1024M",
-        "--seed-time=0.01", "--min-split-size=10M", "--follow-torrent=mem",
-        "--split=16", "--daemon=true", "--allow-overwrite=true",
-        f"--dir={DOWNLOAD_DIR}", "--bt-stop-timeout=1200"
+        "--enable-rpc",
+        "--rpc-listen-all=false",
+        "--rpc-listen-port=6800",
+        "--max-connection-per-server=16",
+        "--rpc-max-request-size=1024M",
+        "--seed-time=0.01",
+        "--min-split-size=10M",
+        "--follow-torrent=mem",
+        "--split=16",
+        "--daemon=true",
+        "--allow-overwrite=true",
+        f"--dir={DOWNLOAD_DIR}",
+        "--bt-stop-timeout=1200"
     ]
     subprocess.Popen(cmd)
-    # No asyncio.sleep here, handled in main loop
+    logger.info("Aria2 Daemon Started")
+    time.sleep(3) # Give it time to boot
 
-# --- UPLOAD HANDLER ---
+# --- BOT LOGIC ---
+app = Client("wzml_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# --- UPLOAD PROGRESS ---
 last_up_time = 0
 async def upload_progress(current, total, message, start_time):
     global last_up_time
@@ -128,12 +143,13 @@ async def download_monitor(aria2, gid, message):
             status = await aria2.tellStatus(gid)
             stat = status.get('status')
 
-            # MAGNET METADATA FIX
+            # --- MAGNET LINK FIX ---
             if stat == 'complete' and 'followedBy' in status:
                 gid = status['followedBy'][0]
-                await status_msg.edit("🧲 **Metadata Fetched. Downloading...**")
+                await status_msg.edit("🧲 **Metadata Fetched. Downloading Files...**")
                 await asyncio.sleep(1)
-                continue
+                continue 
+            # -----------------------
 
             if stat == 'error':
                 await status_msg.edit(f"❌ Error: {status.get('errorMessage')}")
@@ -142,14 +158,11 @@ async def download_monitor(aria2, gid, message):
             if stat == 'complete':
                 await status_msg.edit("✅ **Download Complete. Uploading...**")
                 files = await aria2.getFiles(gid)
-                filepath = files[0]['path']
+                # Logic to find the main file
+                filepath = max(files, key=lambda x: int(x['length']))['path']
                 
-                # Find largest file if multiple
-                if len(files) > 1:
-                    filepath = max(files, key=lambda x: int(x['length']))['path']
-
                 if not os.path.exists(filepath):
-                    await status_msg.edit("❌ File missing.")
+                    await status_msg.edit("❌ File lost during processing.")
                     return
 
                 start = time.time()
@@ -157,7 +170,7 @@ async def download_monitor(aria2, gid, message):
                     await app.send_document(
                         chat_id=message.chat.id,
                         document=filepath,
-                        caption=f"**{os.path.basename(filepath)}**",
+                        caption=f"📂 **{os.path.basename(filepath)}**",
                         progress=upload_progress,
                         progress_args=(status_msg, start)
                     )
@@ -165,10 +178,10 @@ async def download_monitor(aria2, gid, message):
                     shutil.rmtree(DOWNLOAD_DIR, ignore_errors=True)
                     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
                 except Exception as e:
-                    await status_msg.edit(f"❌ Upload Failed: {e}")
+                    await status_msg.edit(f"❌ Upload Error: {e}")
                 return
 
-            # PROGRESS BAR
+            # PROGRESS UPDATE
             if stat == 'active' or stat == 'waiting':
                 if time.time() - last_msg_time < 4:
                     await asyncio.sleep(1)
@@ -188,6 +201,7 @@ Speed: {get_readable_file_size(speed)}/sec
 ETA: {get_readable_time(eta)}
 
 Thanks for using this bot"""
+                
                 try:
                     await status_msg.edit(msg)
                     last_msg_time = time.time()
@@ -195,13 +209,13 @@ Thanks for using this bot"""
 
             await asyncio.sleep(2)
         except Exception as e:
-            print(f"Monitor Error: {e}")
+            logger.error(f"Monitor: {e}")
             await asyncio.sleep(2)
 
 # --- HANDLERS ---
 @app.on_message(filters.command("start"))
 async def start_h(c, m):
-    await m.reply_text("**WZML-X Leech Ready** 🚀")
+    await m.reply_text("**WZML-X Leech Ready** 🚀\nSend Link/Torrent/Magnet.")
 
 @app.on_message(filters.text | filters.document)
 async def leech_h(c, m):
@@ -210,7 +224,7 @@ async def leech_h(c, m):
         msg = await m.reply("📥 **Reading Torrent...**")
         link = await m.download(file_name=f"{DOWNLOAD_DIR}job.torrent")
         await msg.delete()
-    elif m.text:
+    elif m.text and m.text.startswith(("http", "magnet")):
         link = m.text.strip()
 
     if not link: return
@@ -222,26 +236,15 @@ async def leech_h(c, m):
     except Exception as e:
         await m.reply(f"❌ Error: {e}")
 
-# --- MAIN ASYNC ENTRY POINT ---
-async def main():
-    # 1. Start Aria2 Daemon (Subprocess)
-    start_aria2_daemon()
-    await asyncio.sleep(3) # Wait for RPC to be ready
-    
-    # 2. Start Web Server (For Render Health Check)
-    await start_web_server()
-    
-    # 3. Start Pyrogram Client
-    logger.info("Starting Bot...")
-    await app.start()
-    
-    # 4. Idle to keep script running
-    await idle()
-    await app.stop()
-
+# --- MAIN (THREADED APPROACH) ---
 if __name__ == "__main__":
-    # THIS IS THE FIX: We use asyncio.run() which creates the loop correctly for uvloop
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    # 1. Start Web Server in Thread
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    
+    # 2. Start Aria2
+    start_aria2()
+    
+    # 3. Run Bot (This manages the main event loop)
+    print("Bot Started...")
+    app.run()
