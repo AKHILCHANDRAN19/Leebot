@@ -1,6 +1,7 @@
 pyrofork
 aiohttp
 aioaria2
+aioqbt
 uvloop
 tgcrypto
 psutil
