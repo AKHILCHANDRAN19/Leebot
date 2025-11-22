@@ -5,3 +5,4 @@ aioqbt
 uvloop
 tgcrypto
 psutil
+python-magic
