@@ -4,13 +4,13 @@ import math
 import shutil
 import asyncio
 import logging
-import threading
 import subprocess
 import psutil
 import aioaria2
 import uvloop
 from aiohttp import web
 from pyrogram import Client, filters, idle
+from pyrogram.handlers import MessageHandler
 
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "2819362"))
@@ -19,16 +19,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8390475015:AAF8dauJYTWFwktTQABzG17_-JTN
 PORT = int(os.environ.get("PORT", 10000))
 
 DOWNLOAD_DIR = "/app/downloads/"
-ARIA2_BIN = "blitzfetcher" # WZML Binary Name
+ARIA2_BIN = "blitzfetcher"
 START_TIME = time.time()
-
-# Install UVLoop
-uvloop.install()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("WZML-X")
 
-# --- WZML FORMATTERS (EXACT) ---
+# --- WZML EXACT FORMATTERS ---
 SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
 
 def get_readable_file_size(size_in_bytes):
@@ -47,13 +44,13 @@ def get_readable_time(seconds):
     result = ""
     (days, remainder) = divmod(seconds, 86400)
     days = int(days)
-    if days != 0: result += f"{days}d"
+    if days != 0: result += f"{days}d "
     (hours, remainder) = divmod(remainder, 3600)
     hours = int(hours)
-    if hours != 0: result += f"{hours}h"
+    if hours != 0: result += f"{hours}h "
     (minutes, seconds) = divmod(remainder, 60)
     minutes = int(minutes)
-    if minutes != 0: result += f"{minutes}m"
+    if minutes != 0: result += f"{minutes}m "
     seconds = int(seconds)
     result += f"{seconds}s"
     return result
@@ -61,7 +58,7 @@ def get_readable_time(seconds):
 def get_progress_bar_string(pct):
     pct = float(pct)
     p = min(max(pct, 0), 100)
-    cFull = int(p // 8) # WZML uses 12 blocks (approx 8.33%)
+    cFull = int(p // 8)
     p_str = '▤' * cFull
     p_str += '□' * (12 - cFull)
     return f"[{p_str}]"
@@ -69,8 +66,11 @@ def get_progress_bar_string(pct):
 def get_bot_stats():
     cpu = psutil.cpu_percent()
     mem = psutil.virtual_memory().percent
-    disk = psutil.disk_usage(DOWNLOAD_DIR)
-    free = get_readable_file_size(disk.free)
+    try:
+        disk = psutil.disk_usage(DOWNLOAD_DIR)
+        free = get_readable_file_size(disk.free)
+    except:
+        free = "N/A"
     uptime = get_readable_time(time.time() - START_TIME)
     return f"""
 ⌬ Bot Stats
@@ -78,18 +78,18 @@ def get_bot_stats():
 ┠ RAM: {mem}% | UPTIME: {uptime}
 ┖ DL: 0B/s | UL: 0B/s"""
 
-# --- WEB SERVER ---
-async def health_check(request): return web.Response(text="Alive")
-def run_web():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# --- WEB SERVER (For Render Health) ---
+async def health_check(request): 
+    return web.Response(text="WZML-X Alive")
+
+async def start_web_server():
     app = web.Application()
     app.router.add_get("/", health_check)
     runner = web.AppRunner(app)
-    loop.run_until_complete(runner.setup())
+    await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
-    loop.run_until_complete(site.start())
-    loop.run_forever()
+    await site.start()
+    logger.info(f"Web Server Running on Port {PORT}")
 
 # --- ARIA2 ENGINE ---
 def start_aria2():
@@ -104,10 +104,9 @@ def start_aria2():
     ]
     subprocess.Popen(cmd)
 
-# --- BOT CLIENT ---
-app = Client("wzml_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# --- LOGIC HANDLERS (Defined before Client Init) ---
 
-# --- UPLOAD PROGRESS ---
+# UPLOAD PROGRESS
 last_up_time = 0
 async def upload_progress(current, total, message, start_time, filename, user_info):
     global last_up_time
@@ -132,40 +131,33 @@ async def upload_progress(current, total, message, start_time, filename, user_in
     try: await message.edit(text)
     except: pass
 
-# --- DOWNLOAD LOGIC (WZML EXACT REPLICA) ---
-async def download_monitor(aria2, gid, message):
+# DOWNLOAD MONITOR (WZML LOGIC)
+async def download_monitor(client, aria2, gid, message):
     last_msg = 0
     status_msg = await message.reply("⬇️ **Initializing...**")
     user_info = f"┠ User: {message.from_user.first_name} | ID: {message.from_user.id}"
     start_time = time.time()
-    
-    is_metadata = False # Track if we are in metadata phase
+    is_metadata = False
 
     while True:
         try:
             download = await aria2.tellStatus(gid)
             status = download.get('status')
             
-            # --- METADATA & MAGNET LOGIC ---
-            # Check if this is a Metadata download
+            # --- MAGNET LOGIC ---
             if download.get('followedBy'):
                 is_metadata = True
-                # The metadata is done, switch GID to the real download
-                new_gid = download['followedBy'][0]
-                gid = new_gid
-                # Don't break loop, just continue with new GID next iteration
+                gid = download['followedBy'][0]
                 continue 
             
-            # Check if we are currently downloading metadata (before it finishes)
             if download.get('bittorrent') and not download.get('files'):
                  is_metadata = True
             else:
-                 # Once files exist, we are downloading content
                  if download.get('files') and download['files'][0]['path'].startswith('[METADATA]'):
                      is_metadata = True
                  else:
                      is_metadata = False
-            # -------------------------------
+            # --------------------
 
             name = download.get('bittorrent', {}).get('info', {}).get('name', download.get('files', [{}])[0].get('path', 'Unknown'))
             if is_metadata: name = f"[METADATA] {name}"
@@ -186,7 +178,6 @@ async def download_monitor(aria2, gid, message):
                 eta = (total - done) / speed if speed > 0 else 0
                 elapsed = time.time() - start_time
 
-                # EXACT WZML-X TEMPLATE
                 msg = f"""{name}
 ┃ {get_progress_bar_string(pct)} {pct:.2f}%
 ┠ Processed: {get_readable_file_size(done)} of {get_readable_file_size(total)}
@@ -207,20 +198,15 @@ async def download_monitor(aria2, gid, message):
             elif status == 'complete':
                 await status_msg.edit("✅ **Download Complete. Extracting...**")
                 files = await aria2.getFiles(gid)
-                filepath = files[0]['path']
-                
-                # Find largest file
-                if len(files) > 1:
-                    filepath = max(files, key=lambda x: int(x['length']))['path']
+                filepath = max(files, key=lambda x: int(x['length']))['path']
 
                 if not os.path.exists(filepath):
                     await status_msg.edit("❌ File Error.")
                     return
 
-                # Upload
                 u_start = time.time()
                 try:
-                    await app.send_document(
+                    await client.send_document(
                         chat_id=message.chat.id,
                         document=filepath,
                         caption=f"📂 **{os.path.basename(filepath)}**",
@@ -239,37 +225,56 @@ async def download_monitor(aria2, gid, message):
                 return
 
             await asyncio.sleep(2)
-
         except Exception as e:
             print(f"Error: {e}")
             await asyncio.sleep(2)
 
-# --- HANDLERS ---
-@app.on_message(filters.command("start"))
-async def start_h(c, m):
-    await m.reply_text("**WZML-X Leech Ready** 🚀")
+# COMMAND HANDLERS
+async def start_handler(client, message):
+    await message.reply_text("**WZML-X Leech Ready** 🚀")
 
-@app.on_message(filters.text | filters.document)
-async def leech_h(c, m):
+async def leech_handler(client, message):
     link = None
-    if m.document and m.document.file_name.endswith(".torrent"):
-        msg = await m.reply("📥 **Reading Torrent...**")
-        link = await m.download(file_name=f"{DOWNLOAD_DIR}job.torrent")
+    if message.document and message.document.file_name.endswith(".torrent"):
+        msg = await message.reply("📥 **Reading Torrent...**")
+        link = await message.download(file_name=f"{DOWNLOAD_DIR}job.torrent")
         await msg.delete()
-    elif m.text:
-        link = m.text.strip()
+    elif message.text:
+        link = message.text.strip()
 
     if not link: return
 
     try:
         async with aioaria2.Aria2HttpClient("http://localhost:6800/jsonrpc") as aria2:
             gid = await aria2.addUri([link])
-            asyncio.create_task(download_monitor(aria2, gid, m))
+            # Pass client to monitor
+            asyncio.create_task(download_monitor(client, aria2, gid, message))
     except Exception as e:
-        await m.reply(f"❌ Error: {e}")
+        await message.reply(f"❌ Error: {e}")
+
+# --- MAIN ENTRY POINT ---
+async def main():
+    # 1. Start Aria2
+    start_aria2()
+    await asyncio.sleep(3)
+
+    # 2. Start Web Server (Concurrent)
+    asyncio.create_task(start_web_server())
+
+    # 3. Init Client INSIDE loop (Fixes RuntimeError)
+    app = Client("wzml_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+    
+    # 4. Add Handlers
+    app.add_handler(MessageHandler(start_handler, filters.command("start")))
+    app.add_handler(MessageHandler(leech_handler, filters.text | filters.document))
+
+    # 5. Start Bot
+    logger.info("Bot Starting...")
+    await app.start()
+    await idle()
+    await app.stop()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    start_aria2()
-    time.sleep(3)
-    app.run()
+    # Fix for UVLoop Policy on Render
+    uvloop.install()
+    asyncio.run(main())
