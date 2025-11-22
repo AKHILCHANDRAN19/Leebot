@@ -3,3 +3,4 @@ aiohttp
 aioaria2
 uvloop
 tgcrypto
+psutil
